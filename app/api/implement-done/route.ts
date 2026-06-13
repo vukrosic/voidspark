@@ -2,11 +2,11 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 import { getAutoImplementAgent } from '@/lib/autoimplement';
 
 const execFileAsync = promisify(execFile);
-const FLIP_SH = join(RESEARCH_REPO_DIR, 'autoresearch', 'bin', 'flip.sh');
+const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh');
 const SESSION_PREFIX = 'lab-implement-';
 
 function statusOf(md: string): string {
@@ -38,16 +38,16 @@ export async function POST(req: Request) {
   // leave that verdict alone.
   try {
     const md = await readFile(
-      join(RESEARCH_REPO_DIR, 'autoresearch', 'ideas', slug, 'idea.md'),
+      join(getActiveRepoDir(), 'autoresearch', 'ideas', slug, 'idea.md'),
       'utf8'
     );
     const status = statusOf(md);
     finalized = status;
     if (status === 'implementing') {
       await execFileAsync(
-        FLIP_SH,
+        FLIP_SH(),
         [slug, 'needs-run', 'done-button', 'auto-finalized on implement-done'],
-        { cwd: RESEARCH_REPO_DIR, timeout: 15_000 }
+        { cwd: getActiveRepoDir(), timeout: 15_000 }
       );
       finalized = 'needs-run';
     }

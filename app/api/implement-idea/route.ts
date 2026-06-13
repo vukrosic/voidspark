@@ -1,7 +1,8 @@
 import { readFile } from 'fs/promises';
-import { launchCodexWithText, RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { launchCodexWithText } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
-const TEMPLATE_PATH = `${RESEARCH_REPO_DIR}/autoresearch/prompts/implement-idea.md`;
+const TEMPLATE_PATH = () => `${getActiveRepoDir()}/autoresearch/prompts/implement-idea.md`;
 
 export async function POST(req: Request) {
   let slug = '';
@@ -23,7 +24,7 @@ export async function POST(req: Request) {
 
   let template: string;
   try {
-    template = await readFile(TEMPLATE_PATH, 'utf8');
+    template = await readFile(TEMPLATE_PATH(), 'utf8');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ success: false, error: message }, { status: 500 });
@@ -45,7 +46,7 @@ export async function POST(req: Request) {
   // survive the launcher's double-quoted send-keys line; slug is validated.
   const onExit = `curl -s -X POST '${doneUrl}' -H 'Content-Type: application/json' -d '{"slug":"${slug}"}' >/dev/null 2>&1`;
 
-  const result = await launchCodexWithText(prompt, 'lab-implement', RESEARCH_REPO_DIR, session, agent, {
+  const result = await launchCodexWithText(prompt, 'lab-implement', getActiveRepoDir(), session, agent, {
     headless,
     onExit,
   });

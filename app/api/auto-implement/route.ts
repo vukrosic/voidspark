@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 import {
   getAutoImplementAgent,
   setAutoImplement,
@@ -10,7 +10,7 @@ import {
 } from '@/lib/autoimplement';
 
 const execFileAsync = promisify(execFile);
-const IDEAS_DIR = join(RESEARCH_REPO_DIR, 'autoresearch', 'ideas');
+const IDEAS_DIR = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
 const IMPLEMENT_PREFIX = 'lab-implement-';
 
 function field(md: string, key: string): string {
@@ -23,14 +23,14 @@ type Idea = { slug: string; status: string; updated: string };
 async function allIdeas(): Promise<Idea[]> {
   let dirs: string[];
   try {
-    dirs = await readdir(IDEAS_DIR);
+    dirs = await readdir(IDEAS_DIR());
   } catch {
     return [];
   }
   const ideas: Idea[] = [];
   for (const dir of dirs) {
     try {
-      const md = await readFile(join(IDEAS_DIR, dir, 'idea.md'), 'utf8');
+      const md = await readFile(join(IDEAS_DIR(), dir, 'idea.md'), 'utf8');
       ideas.push({
         slug: field(md, 'id') || dir,
         status: field(md, 'status'),

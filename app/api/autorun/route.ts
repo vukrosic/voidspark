@@ -2,13 +2,15 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { launchCodexWithText, RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { launchCodexWithText } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 import { getAutorunAgent, setAutorun } from '@/lib/autorun';
+import { getRunnerExtra, renderRunnerExtra } from '@/lib/runnerExtra';
 
 const execFileAsync = promisify(execFile);
-const IDEAS_DIR = join(RESEARCH_REPO_DIR, 'autoresearch', 'ideas');
-const RUNNER_PROMPT = join(RESEARCH_REPO_DIR, 'autoresearch', 'prompts', 'runner.md');
-const BOX_JSON = join(RESEARCH_REPO_DIR, 'autoresearch', 'remote-box.json');
+const IDEAS_DIR = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+const RUNNER_PROMPT = () => join(getActiveRepoDir(), 'autoresearch', 'prompts', 'runner.md');
+const BOX_JSON = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
 
 // One persistent runner agent owns the GPU queue while autorun is on. It reads
 // runner.md, claims the WHOLE needs-run set, and drains it on the box's detached
@@ -24,14 +26,14 @@ function field(md: string, key: string): string {
 async function needsRunCount(): Promise<number> {
   let dirs: string[];
   try {
-    dirs = await readdir(IDEAS_DIR);
+    dirs = await readdir(IDEAS_DIR());
   } catch {
     return 0;
   }
   let n = 0;
   for (const dir of dirs) {
     try {
-      const md = await readFile(join(IDEAS_DIR, dir, 'idea.md'), 'utf8');
+      const md = await readFile(join(IDEAS_DIR(), dir, 'idea.md'), 'utf8');
       if (field(md, 'status') === 'needs-run') n += 1;
     } catch {
       /* skip */
@@ -64,7 +66,7 @@ async function killRunner(): Promise<void> {
 async function runnerPrompt(): Promise<string> {
   let box: Record<string, string> = {};
   try {
-    box = JSON.parse(await readFile(BOX_JSON, 'utf8'));
+    box = JSON.parse(await readFile(BOX_JSON(), 'utf8'));
   } catch {
     /* runner.md §0 falls back to the latest results.json box */
   }
@@ -73,11 +75,12 @@ async function runnerPrompt(): Promise<string> {
     : 'No box in remote-box.json — follow runner.md §0 to recover the live box, or print NO BOX and stop.';
 
   return [
-    `Read autoresearch/prompts/runner.md and autoresearch/PIPELINE.md and execute ONE full runner pass exactly as specified. You are in ${RESEARCH_REPO_DIR}.`,
+    `Read autoresearch/prompts/runner.md and autoresearch/PIPELINE.md and execute ONE full runner pass exactly as specified. You are in ${getActiveRepoDir()}.`,
     '',
     sshLine,
     '',
     "If a queue tmux session named `arq` is already live on the box, do NOT relaunch it — poll STATUS, pull finished logs, finalize evidence.md + status flips, then exit. One pass per invocation; no waiting loops longer than a few minutes. The runs live in the box's detached tmux, so this agent exiting does not stop them.",
+    renderRunnerExtra(await getRunnerExtra()),
   ].join('\n');
 }
 
@@ -110,7 +113,7 @@ export async function POST(req: Request) {
     const result = await launchCodexWithText(
       await runnerPrompt(),
       'lab-autorun',
-      RESEARCH_REPO_DIR,
+      getActiveRepoDir(),
       RUNNER_SESSION,
       current,
       { headless: true }

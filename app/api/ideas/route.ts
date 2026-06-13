@@ -1,8 +1,8 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
-const IDEAS_DIR = join(RESEARCH_REPO_DIR, 'autoresearch', 'ideas');
+const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
 
 type Result = {
   verdict: string; // WIN | NULL | DRIFT | FAIL | ...
@@ -70,7 +70,7 @@ function parseTitle(md: string, fallback: string): string {
 async function listIdeas(): Promise<Idea[]> {
   let entries: string[];
   try {
-    entries = await readdir(IDEAS_DIR);
+    entries = await readdir(ideasDir());
   } catch {
     return [];
   }
@@ -78,12 +78,12 @@ async function listIdeas(): Promise<Idea[]> {
   const ideas: Idea[] = [];
   for (const dir of entries) {
     try {
-      const md = await readFile(join(IDEAS_DIR, dir, 'idea.md'), 'utf8');
+      const md = await readFile(join(ideasDir(), dir, 'idea.md'), 'utf8');
       const fm = parseFrontmatter(md);
       // Read evidence.md if present, and parse the loss numbers out of it.
       let evidenceMd: string | null = null;
       try {
-        evidenceMd = await readFile(join(IDEAS_DIR, dir, 'evidence.md'), 'utf8');
+        evidenceMd = await readFile(join(ideasDir(), dir, 'evidence.md'), 'utf8');
       } catch {
         evidenceMd = null;
       }

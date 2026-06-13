@@ -2,10 +2,10 @@ import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { promisify } from 'util';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
-const REMOTE_BOX_PATH = join(RESEARCH_REPO_DIR, 'autoresearch', 'remote-box.json');
+const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
 
 // The actual GPU training runs inside a detached tmux session named `arq` on
 // the remote Vast box (see autoresearch/prompts/run-idea.md). This route SSHes
@@ -40,7 +40,7 @@ function section(out: string, name: string): string {
 export async function POST() {
   let box: RemoteBox = {};
   try {
-    box = JSON.parse(await readFile(REMOTE_BOX_PATH, 'utf8'));
+    box = JSON.parse(await readFile(REMOTE_BOX_PATH(), 'utf8'));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ success: false, error: `cannot read remote-box.json: ${message}` }, { status: 200 });

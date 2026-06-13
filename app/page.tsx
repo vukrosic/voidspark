@@ -294,6 +294,16 @@ export default function LaunchCodexPage() {
   // (server-side, via run-done). Mirrors a persisted flag; reflects real state.
   const [autorunOn, setAutorunOn] = useState<boolean>(false);
   const [autorunBusy, setAutorunBusy] = useState<boolean>(false);
+  // Free-text instructions appended to the GPU runner agent's prompt (e.g. a
+  // one-off Vast.ai bash command). Persisted server-side via /api/runner-extra.
+  const [runnerExtra, setRunnerExtra] = useState<string>("");
+  const [runnerExtraSaving, setRunnerExtraSaving] = useState<boolean>(false);
+  const [runnerExtraMsg, setRunnerExtraMsg] = useState<string>("");
+  // Multi-project: the registered repos and which one is active. Switching
+  // re-points every agent/API at that repo (see lib/projects.ts).
+  const [projects, setProjects] = useState<{ id: string; name: string; repoPath: string }[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string>("");
+  const [projectSwitching, setProjectSwitching] = useState<boolean>(false);
   // Auto-implement: when on, Proposed ideas get implemented automatically (up to
   // a parallel cap). Defaults ON — optimistic so the toggle reads "on" before
   // the first state fetch resolves.
@@ -503,6 +513,31 @@ export default function LaunchCodexPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Load the persisted runner extra-instructions once on mount.
+  useEffect(() => {
+    fetch("/api/runner-extra/", { method: "POST" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && typeof d.text === "string") setRunnerExtra(d.text);
+      })
+      .catch(() => {
+        /* leave empty */
+      });
+  }, []);
+
+  // Load the project registry + active project once on mount.
+  useEffect(() => {
+    fetch("/api/projects/", { method: "POST" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && Array.isArray(d.projects)) setProjects(d.projects);
+        if (d && typeof d.activeId === "string") setActiveProjectId(d.activeId);
+      })
+      .catch(() => {
+        /* no registry */
+      });
+  }, []);
+
   // Auto-implement: a bodyless POST reports state AND drives one tick (launches
   // implements for Proposed ideas up to the cap). Call it on load and every 5s
   // so freshly-generated ideas get picked up without a click. The server-side
@@ -685,6 +720,65 @@ export default function LaunchCodexPage() {
       setAutorunBusy(false);
       refreshSessions();
       refreshIdeas();
+    }
+  };
+
+  // Switch the active project. Every API route resolves the active repo per
+  // request, so after switching we just re-pull the project-scoped state.
+  const handleSwitchProject = async (id: string) => {
+    if (id === activeProjectId || projectSwitching) return;
+    setProjectSwitching(true);
+    try {
+      const response = await fetch("/api/projects/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activeId: id }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && typeof data.activeId === "string") {
+        setActiveProjectId(data.activeId);
+        if (Array.isArray(data.projects)) setProjects(data.projects);
+        // Re-pull everything that is per-project.
+        refreshIdeas();
+        refreshSessions();
+        fetch("/api/runner-extra/", { method: "POST" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d && typeof d.text === "string") setRunnerExtra(d.text);
+          })
+          .catch(() => {});
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setProjectSwitching(false);
+    }
+  };
+
+  // Save the runner extra-instructions. Applies to the NEXT runner launch
+  // (autorun tick or manual "Run next") — not a run already in flight.
+  const handleSaveRunnerExtra = async () => {
+    setRunnerExtraSaving(true);
+    setRunnerExtraMsg("");
+    try {
+      const response = await fetch("/api/runner-extra/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: runnerExtra }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && typeof data.text === "string") {
+        setRunnerExtra(data.text);
+        setRunnerExtraMsg(
+          data.text ? "Saved — appended to the next runner launch." : "Cleared."
+        );
+      } else {
+        setRunnerExtraMsg("Save failed.");
+      }
+    } catch {
+      setRunnerExtraMsg("Save failed.");
+    } finally {
+      setRunnerExtraSaving(false);
     }
   };
 
@@ -1319,8 +1413,57 @@ export default function LaunchCodexPage() {
   };
 
   return (
-    <main className="min-h-screen bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
-      <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10">
+    <div className="flex min-h-screen bg-[#1f1e1d] text-[#faf9f6]">
+      {/* Project sidebar — pick which repo the loop drives. Switching re-points
+          every agent/API at that repo (its ideas, queue, autorun, GPU box). */}
+      <aside className="hidden w-60 shrink-0 flex-col border-r border-white/10 bg-black/20 px-4 py-6 md:flex">
+        <div className="px-1 text-sm font-semibold tracking-tight text-[#faf9f6]">
+          VoidSpark
+        </div>
+        <div className="mt-6 px-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/40">
+          Projects
+        </div>
+        <nav className="mt-2 flex flex-col gap-1">
+          {projects.length === 0 && (
+            <span className="px-2 py-1.5 text-xs text-[#faf9f6]/40">No projects</span>
+          )}
+          {projects.map((p) => {
+            const active = p.id === activeProjectId;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => handleSwitchProject(p.id)}
+                disabled={projectSwitching}
+                title={p.repoPath}
+                className={`flex flex-col items-start rounded-md px-2 py-1.5 text-left text-xs transition disabled:opacity-50 ${
+                  active
+                    ? "bg-white/[0.08] text-[#faf9f6]"
+                    : "text-[#faf9f6]/55 hover:bg-white/[0.04] hover:text-white"
+                }`}
+              >
+                <span className="flex w-full items-center gap-1.5">
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                      active ? "bg-emerald-400" : "bg-[#faf9f6]/25"
+                    }`}
+                  />
+                  <span className="truncate font-medium">{p.name}</span>
+                </span>
+                <span className="mt-0.5 w-full truncate pl-3 text-[10px] text-[#faf9f6]/30">
+                  {p.repoPath}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+        <p className="mt-4 px-2 text-[10px] leading-relaxed text-[#faf9f6]/30">
+          Add repos in <span className="font-mono">projects.json</span>.
+        </p>
+      </aside>
+
+      <main className="min-h-screen flex-1 bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
+        <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10">
         {/* Uncommon controls (agent, headless, prompt files) live behind this
             gear so the main view stays focused on ideas + the queue. */}
         <div className="relative w-full max-w-2xl">
@@ -1643,6 +1786,43 @@ export default function LaunchCodexPage() {
             </p>
           )}
 
+          {/* Operator instructions appended to the GPU runner agent's prompt —
+              e.g. a one-off Vast.ai bash command. Applies to the next launch. */}
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
+            <div className="flex items-center justify-between">
+              <label
+                htmlFor="runner-extra"
+                className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/55"
+              >
+                Runner instructions · appended to the Vast.ai agent prompt
+              </label>
+              <div className="flex items-center gap-2">
+                {runnerExtraMsg && (
+                  <span className="text-[11px] text-emerald-200/80">
+                    {runnerExtraMsg}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleSaveRunnerExtra}
+                  disabled={runnerExtraSaving}
+                  className="rounded-full border border-white/15 bg-white/[0.04] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {runnerExtraSaving ? "Saving…" : "Save"}
+                </button>
+              </div>
+            </div>
+            <textarea
+              id="runner-extra"
+              value={runnerExtra}
+              onChange={(e) => setRunnerExtra(e.target.value)}
+              rows={3}
+              spellCheck={false}
+              placeholder={'e.g. Before training, run on the box:\nnvidia-smi; export TORCHDYNAMO_DISABLE=1'}
+              className="mt-2 w-full resize-y rounded-md border border-white/10 bg-[#1f1e1d] px-3 py-2 font-mono text-xs text-[#faf9f6]/90 placeholder:text-[#faf9f6]/30 focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+            />
+          </div>
+
           {gpuQueue.length === 0 ? (
             <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm text-[#faf9f6]/40">
               No ready GPU work.
@@ -1962,11 +2142,12 @@ export default function LaunchCodexPage() {
         </section>
       </div>
 
-      <MarkdownPanel
-        path={openFile?.path ?? null}
-        title={openFile?.title ?? ""}
-        onClose={() => setOpenFile(null)}
-      />
-    </main>
+        <MarkdownPanel
+          path={openFile?.path ?? null}
+          title={openFile?.title ?? ""}
+          onClose={() => setOpenFile(null)}
+        />
+      </main>
+    </div>
   );
 }

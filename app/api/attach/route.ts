@@ -3,10 +3,10 @@ import { writeFile, chmod, unlink, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
-const REMOTE_BOX_PATH = join(RESEARCH_REPO_DIR, 'autoresearch', 'remote-box.json');
+const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
 const REMOTE_TMUX = 'arq';
 
 // Open a Terminal window running `cmd` by writing a temporary `.command` file
@@ -33,7 +33,7 @@ export async function POST(req: Request) {
   // Remote attach: SSH into the GPU box and attach its `arq` tmux directly.
   if (body.remote) {
     try {
-      const box = JSON.parse(await readFile(REMOTE_BOX_PATH, 'utf8')) as {
+      const box = JSON.parse(await readFile(REMOTE_BOX_PATH(), 'utf8')) as {
         host?: string;
         port?: number;
         user?: string;

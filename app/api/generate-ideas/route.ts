@@ -1,7 +1,8 @@
 import { readFile } from 'fs/promises';
-import { launchCodexWithText, RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { launchCodexWithText } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
-const PROMPT_PATH = `${RESEARCH_REPO_DIR}/autoresearch/prompts/generate-ideas.md`;
+const PROMPT_PATH = () => `${getActiveRepoDir()}/autoresearch/prompts/generate-ideas.md`;
 
 // Swap the count in the prompt's "Generate exactly N new ideas this pass." line
 // with the number the user picked in the UI. If the line was edited away, append
@@ -31,7 +32,7 @@ export async function POST(req: Request) {
 
   let prompt: string;
   try {
-    prompt = injectCount(await readFile(PROMPT_PATH, 'utf8'), count);
+    prompt = injectCount(await readFile(PROMPT_PATH(), 'utf8'), count);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ success: false, error: message }, { status: 500 });

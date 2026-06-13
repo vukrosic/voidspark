@@ -1,8 +1,8 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
-const RESULTS_DIR = join(RESEARCH_REPO_DIR, 'remote-results');
+const RESULTS_DIR = () => join(getActiveRepoDir(), 'remote-results');
 
 // Only letters, digits, dot, dash, underscore — keeps path traversal impossible
 // and matches the slug shape used everywhere else for idea ids.
@@ -45,14 +45,14 @@ async function findExperimentDir(id: string): Promise<string | null> {
 
   let dateDirs: string[];
   try {
-    dateDirs = await readdir(RESULTS_DIR);
+    dateDirs = await readdir(RESULTS_DIR());
   } catch {
     return null;
   }
   dateDirs.sort((a, b) => b.localeCompare(a));
 
   for (const dateDir of dateDirs) {
-    const datePath = join(RESULTS_DIR, dateDir);
+    const datePath = join(RESULTS_DIR(), dateDir);
     let subs: string[];
     try {
       subs = await readdir(datePath);

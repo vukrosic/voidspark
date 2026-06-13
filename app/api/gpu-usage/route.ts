@@ -2,10 +2,10 @@ import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { promisify } from 'util';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
-const REMOTE_BOX_PATH = join(RESEARCH_REPO_DIR, 'autoresearch', 'remote-box.json');
+const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
 
 // Deliberately tiny sibling of /api/gpu: this route asks the box for ONLY the
 // live GPU usage numbers (util %, VRAM used/total) so the UI can poll it on a
@@ -35,7 +35,7 @@ function section(out: string, name: string): string {
 export async function POST() {
   let box: RemoteBox = {};
   try {
-    box = JSON.parse(await readFile(REMOTE_BOX_PATH, 'utf8'));
+    box = JSON.parse(await readFile(REMOTE_BOX_PATH(), 'utf8'));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ success: false, error: `cannot read remote-box.json: ${message}` }, { status: 200 });

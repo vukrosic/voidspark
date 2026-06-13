@@ -2,12 +2,14 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { launchCodexWithText, RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { launchCodexWithText } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
+import { getRunnerExtra, renderRunnerExtra } from '@/lib/runnerExtra';
 
 const execFileAsync = promisify(execFile);
-const IDEAS_DIR = join(RESEARCH_REPO_DIR, 'autoresearch', 'ideas');
-const FLIP_SH = join(RESEARCH_REPO_DIR, 'autoresearch', 'bin', 'flip.sh');
-const TEMPLATE_PATH = join(RESEARCH_REPO_DIR, 'autoresearch', 'prompts', 'run-idea.md');
+const IDEAS_DIR = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh');
+const TEMPLATE_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'prompts', 'run-idea.md');
 
 function field(md: string, key: string): string {
   const m = md.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));
@@ -18,8 +20,8 @@ type QueueIdea = { slug: string; status: string; updated: string };
 
 async function requeueAfterFailure(slug: string) {
   try {
-    await execFileAsync(FLIP_SH, [slug, 'needs-run', 'run-button', 'launch failed; requeued'], {
-      cwd: RESEARCH_REPO_DIR,
+    await execFileAsync(FLIP_SH(), [slug, 'needs-run', 'run-button', 'launch failed; requeued'], {
+      cwd: getActiveRepoDir(),
       timeout: 15_000,
     });
   } catch (error) {
@@ -31,14 +33,14 @@ async function requeueAfterFailure(slug: string) {
 async function queueIdeas(): Promise<QueueIdea[]> {
   let dirs: string[];
   try {
-    dirs = await readdir(IDEAS_DIR);
+    dirs = await readdir(IDEAS_DIR());
   } catch {
     return [];
   }
   const ideas: QueueIdea[] = [];
   for (const dir of dirs) {
     try {
-      const md = await readFile(join(IDEAS_DIR, dir, 'idea.md'), 'utf8');
+      const md = await readFile(join(IDEAS_DIR(), dir, 'idea.md'), 'utf8');
       const status = field(md, 'status');
       if (status === 'needs-run' || status === 'running') {
         ideas.push({ slug: field(md, 'id') || dir, status, updated: field(md, 'updated') });
@@ -82,8 +84,8 @@ export async function POST(req: Request) {
 
   // Claim it now so a second "Run next" click picks the following idea, not this one.
   try {
-    await execFileAsync(FLIP_SH, [slug, 'running', 'run-button', 'claimed by Run-next'], {
-      cwd: RESEARCH_REPO_DIR,
+    await execFileAsync(FLIP_SH(), [slug, 'running', 'run-button', 'claimed by Run-next'], {
+      cwd: getActiveRepoDir(),
       timeout: 15_000,
     });
   } catch (error) {
@@ -93,7 +95,7 @@ export async function POST(req: Request) {
 
   let template: string;
   try {
-    template = await readFile(TEMPLATE_PATH, 'utf8');
+    template = await readFile(TEMPLATE_PATH(), 'utf8');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await requeueAfterFailure(slug);
@@ -102,7 +104,9 @@ export async function POST(req: Request) {
 
   const host = req.headers.get('host') ?? 'localhost:3000';
   const doneUrl = `http://${host}/api/run-done/`;
-  const prompt = template.replaceAll('{{IDEA_SLUG}}', slug).replaceAll('{{DONE_URL}}', doneUrl);
+  const prompt =
+    template.replaceAll('{{IDEA_SLUG}}', slug).replaceAll('{{DONE_URL}}', doneUrl) +
+    renderRunnerExtra(await getRunnerExtra());
   const session = `lab-run-${slug}`;
 
   // Headless safety net: curl run-done after the agent exits so a finished (or
@@ -110,7 +114,7 @@ export async function POST(req: Request) {
   // needs-recode rather than leaving the GPU queue wedged. slug is validated.
   const onExit = `curl -s -X POST '${doneUrl}' -H 'Content-Type: application/json' -d '{"slug":"${slug}"}' >/dev/null 2>&1`;
 
-  const result = await launchCodexWithText(prompt, 'lab-run', RESEARCH_REPO_DIR, session, agent, {
+  const result = await launchCodexWithText(prompt, 'lab-run', getActiveRepoDir(), session, agent, {
     headless,
     onExit,
   });

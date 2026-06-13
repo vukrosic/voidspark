@@ -1,10 +1,10 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
-import { RESEARCH_REPO_DIR } from '@/lib/codexLauncher';
+import { getActiveRepoDir } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
-const FLIP_SH = join(RESEARCH_REPO_DIR, 'autoresearch', 'bin', 'flip.sh');
+const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh');
 
 // Statuses the UI is allowed to set directly (the Reset action sends
 // "needs-taste"). Keep this whitelist tight so the button can't drive the
@@ -30,9 +30,9 @@ export async function POST(req: Request) {
 
   try {
     const { stdout } = await execFileAsync(
-      FLIP_SH,
+      FLIP_SH(),
       [slug, status, 'reset-button', note || 'reset from UI'],
-      { cwd: RESEARCH_REPO_DIR, timeout: 15_000 }
+      { cwd: getActiveRepoDir(), timeout: 15_000 }
     );
     return Response.json({ success: true, slug, status, stdout: stdout.trim() }, { status: 200 });
   } catch (error) {
