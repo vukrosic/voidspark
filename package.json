@@ -1,0 +1,39 @@
+{
+  "name": "voidspark",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "codex:launch-server": "node scripts/codex-launch-server.mjs"
+  },
+  "dependencies": {
+    "framer-motion": "^12.27.0",
+    "gray-matter": "^4.0.3",
+    "highlight.js": "^11.11.1",
+    "lucide-react": "^0.544.0",
+    "next": "15.5.3",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^9",
+    "eslint-config-next": "15.5.3",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5"
+  }
+}
