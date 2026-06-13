@@ -2,6 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { MarkdownPanel } from "@/components/markdown-panel";
+import AnalyticsView from "@/components/analytics-view";
+
+// Which top-level view the sidebar is showing. "home" is the main dashboard
+// (ideas + GPU + finished); "analytics" is the stage-timing view. Clicking the
+// VoidSpark wordmark always returns to "home".
+type View = "home" | "analytics";
 
 type Session = {
   name: string;
@@ -75,11 +81,30 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   "needs-review": { label: "Review", cls: "border-violet-300/25 bg-violet-300/10 text-violet-200/90" },
   done: { label: "Done", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/70" },
   rejected: { label: "Rejected", cls: "border-red-300/25 bg-red-300/5 text-red-200/80" },
-  win: { label: "Win", cls: "border-emerald-400/40 bg-emerald-400/15 text-emerald-200" },
-  null: { label: "Null", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/60" },
-  drift: { label: "Drift", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
-  fail: { label: "Fail", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
+  win: { label: "Improved", cls: "border-emerald-400/40 bg-emerald-400/15 text-emerald-200" },
+  null: { label: "No change", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/60" },
+  drift: { label: "Invalid run", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
+  fail: { label: "Worse", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
 };
+
+// The A/B verdict (from evidence.md) in plain words. "NULL" especially confuses
+// — it does NOT mean failed, it means the change made no measurable difference
+// (the loss delta fell inside the noise band between the two baselines).
+const VERDICT_META: Record<string, { label: string; help: string }> = {
+  WIN: { label: "Improved", help: "Beat the baseline beyond the noise band." },
+  NULL: {
+    label: "No change",
+    help: "No measurable difference — the change neither helped nor hurt (delta within the two-baseline noise band).",
+  },
+  FAIL: { label: "Worse", help: "Did worse than the baseline." },
+  DRIFT: {
+    label: "Invalid run",
+    help: "Baselines disagreed too much — the comparison can't be trusted, not a real result.",
+  },
+};
+function verdictMeta(v: string): { label: string; help: string } {
+  return VERDICT_META[v?.toUpperCase()] ?? { label: v || "—", help: "" };
+}
 
 function statusMeta(s: string): { label: string; cls: string } {
   return (
@@ -116,172 +141,8 @@ const FINISHED_STATUSES = new Set([
 const isTimedStatus = (status: string) =>
   status !== "needs-taste" && !FINISHED_STATUSES.has(status);
 
-type CurveRun = {
-  role: "control" | "treatment" | "control2";
-  label: string;
-  steps: number[];
-  valLosses: number[];
-};
-type CurveData = { id: string; runs: CurveRun[] };
-
-// Module-level cache so re-renders / re-mounts don't re-hit the API for the same
-// finished experiment. The curve never changes once a run is done.
-const curveCache = new Map<string, CurveData>();
-
-const CURVE_COLOR: Record<CurveRun["role"], string> = {
-  control: "#9ca3af", // grey — baseline
-  treatment: "#34d399", // emerald — the experiment
-  control2: "#c084fc", // violet — second baseline
-};
-
-// Full per-step validation-loss curve for one finished experiment, drawn as an
-// inline SVG (no chart lib). One line per run (ctrl / experiment / ctrl2) over a
-// shared, auto-scaled axis, with a small legend. Renders nothing until data
-// arrives, and nothing if the experiment has no usable curve.
-function TrainingCurve({ id }: { id: string }) {
-  const [data, setData] = useState<CurveData | null>(
-    () => curveCache.get(id) ?? null
-  );
-
-  useEffect(() => {
-    if (curveCache.has(id)) {
-      setData(curveCache.get(id)!);
-      return;
-    }
-    let cancelled = false;
-    fetch("/api/training-curve/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: CurveData | null) => {
-        if (cancelled || !d || !Array.isArray(d.runs)) return;
-        curveCache.set(id, d);
-        setData(d);
-      })
-      .catch(() => {
-        /* leave chart hidden on failure */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
-
-  const runs = (data?.runs ?? []).filter((r) => r.steps.length > 1);
-  if (runs.length === 0) return null;
-
-  const W = 460;
-  const H = 190;
-  const padL = 40;
-  const padR = 12;
-  const padT = 12;
-  const padB = 26;
-
-  const allSteps = runs.flatMap((r) => r.steps);
-  const allLoss = runs.flatMap((r) => r.valLosses);
-  const minX = Math.min(...allSteps);
-  const maxX = Math.max(...allSteps);
-  const minY = Math.min(...allLoss);
-  const maxY = Math.max(...allLoss);
-  const spanX = maxX - minX || 1;
-  const spanY = maxY - minY || 1;
-  const px = (x: number) => padL + ((x - minX) / spanX) * (W - padL - padR);
-  const py = (y: number) =>
-    padT + (1 - (y - minY) / spanY) * (H - padT - padB);
-
-  const yTicks = [minY, minY + spanY / 2, maxY];
-
-  return (
-    <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-3">
-      <div className="mb-2 text-[10px] uppercase tracking-[0.2em] text-[#faf9f6]/40">
-        val loss · full training curve
-      </div>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        role="img"
-        aria-label={`Validation loss curve for ${id}`}
-      >
-        {/* y gridlines + labels */}
-        {yTicks.map((v, i) => (
-          <g key={i}>
-            <line
-              x1={padL}
-              y1={py(v)}
-              x2={W - padR}
-              y2={py(v)}
-              stroke="#ffffff"
-              strokeOpacity={0.07}
-              strokeWidth={1}
-            />
-            <text
-              x={padL - 5}
-              y={py(v) + 3}
-              textAnchor="end"
-              fontSize={9}
-              fill="#faf9f6"
-              fillOpacity={0.45}
-              fontFamily="monospace"
-            >
-              {v.toFixed(2)}
-            </text>
-          </g>
-        ))}
-        {/* x end labels */}
-        <text
-          x={padL}
-          y={H - 8}
-          textAnchor="start"
-          fontSize={9}
-          fill="#faf9f6"
-          fillOpacity={0.4}
-          fontFamily="monospace"
-        >
-          step {minX}
-        </text>
-        <text
-          x={W - padR}
-          y={H - 8}
-          textAnchor="end"
-          fontSize={9}
-          fill="#faf9f6"
-          fillOpacity={0.4}
-          fontFamily="monospace"
-        >
-          {maxX}
-        </text>
-        {/* one polyline per run */}
-        {runs.map((r) => (
-          <polyline
-            key={r.role}
-            fill="none"
-            stroke={CURVE_COLOR[r.role]}
-            strokeWidth={1.75}
-            strokeOpacity={r.role === "treatment" ? 1 : 0.85}
-            points={r.steps
-              .map((s, idx) => `${px(s)},${py(r.valLosses[idx])}`)
-              .join(" ")}
-          />
-        ))}
-      </svg>
-      {/* legend */}
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-[#faf9f6]/55">
-        {runs.map((r) => (
-          <span key={r.role} className="flex items-center gap-1.5">
-            <span
-              className="inline-block h-2 w-3 rounded-sm"
-              style={{ backgroundColor: CURVE_COLOR[r.role] }}
-            />
-            <span className="font-mono">{r.label}</span>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export default function LaunchCodexPage() {
+  const [view, setView] = useState<View>("home");
   const [agent, setAgent] = useState<string>("minimax");
   // Headless = run the agent non-interactively so it exits (and the tmux pane
   // self-closes) when the task finishes. On by default; uncheck to keep the
@@ -338,7 +199,10 @@ export default function LaunchCodexPage() {
   const [runnerExtraOpen, setRunnerExtraOpen] = useState<boolean>(false);
   const [showAllFinished, setShowAllFinished] = useState<boolean>(false);
   const [gpuQueueExpanded, setGpuQueueExpanded] = useState<boolean>(false);
-  const [bulkRequeueBusy, setBulkRequeueBusy] = useState<boolean>(false);
+  // Ids we've already auto-requeued this stale-episode, so the self-healing
+  // effect fires once per stuck run (not every tick). Cleared when a run leaves
+  // the stale set so a future stall can re-trigger.
+  const autoRequeuedRef = useRef<Set<string>>(new Set());
   const [implementing, setImplementing] = useState<string | null>(null);
   const [attaching, setAttaching] = useState<string | null>(null);
   const [ideaActionMsg, setIdeaActionMsg] = useState("");
@@ -1014,40 +878,6 @@ export default function LaunchCodexPage() {
     }
   };
 
-  const handleRequeueStaleRuns = async () => {
-    const stale = staleRunningIdeas.map((idea) => idea.id);
-    if (stale.length === 0 || bulkRequeueBusy) return;
-    setBulkRequeueBusy(true);
-    setRunMessage("");
-    try {
-      const results = await Promise.all(
-        stale.map(async (slug) => {
-          const response = await fetch("/api/flip/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              slug,
-              status: "needs-run",
-              note: "bulk requeued stale GPU run from UI",
-            }),
-          });
-          return response.ok;
-        })
-      );
-      const ok = results.filter(Boolean).length;
-      setRunMessage(
-        ok === stale.length
-          ? `Requeued ${ok} stale run${ok === 1 ? "" : "s"}.`
-          : `Requeued ${ok}/${stale.length} stale runs; refresh to inspect the rest.`
-      );
-    } catch {
-      setRunMessage("Bulk requeue failed.");
-    } finally {
-      setBulkRequeueBusy(false);
-      refreshIdeas();
-    }
-  };
-
   const handleAttach = async (name: string) => {
     setAttaching(name);
     setSessionMsg("");
@@ -1117,6 +947,49 @@ export default function LaunchCodexPage() {
     const isRemoteCurrent = arqAlive && currentRunIdea?.id === idea.id;
     return !liveSessions.has(sessionName) && !isRemoteCurrent;
   });
+
+  // Self-healing: an idea marked `running` with no live supervisor and no remote
+  // arq is a dead marker — flip it back to `needs-run` automatically so the
+  // queue recovers without a button. Guards against false positives: a run must
+  // have been "running" for >90s (so a just-launched run whose supervisor/arq
+  // haven't registered yet isn't yanked), and each id is requeued at most once
+  // per stale episode. Runs on the 1s `now` tick; the body is cheap and no-ops
+  // when nothing qualifies. Page-open only, which is fine — staleness is a local
+  // UI/session signal, and the server-side autorun chain handles the rest.
+  useEffect(() => {
+    const staleIds = new Set(staleRunningIdeas.map((i) => i.id));
+    // Forget ids that recovered, so a future stall can re-trigger.
+    autoRequeuedRef.current.forEach((id) => {
+      if (!staleIds.has(id)) autoRequeuedRef.current.delete(id);
+    });
+    const ripe = staleRunningIdeas.filter((idea) => {
+      const t = Date.parse(idea.updated);
+      return (
+        Number.isFinite(t) &&
+        Date.now() - t > 90_000 &&
+        !autoRequeuedRef.current.has(idea.id)
+      );
+    });
+    if (ripe.length === 0) return;
+    ripe.forEach((idea) => {
+      autoRequeuedRef.current.add(idea.id);
+      fetch("/api/flip/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slug: idea.id,
+          status: "needs-run",
+          note: "auto-requeued stale GPU run (no live supervisor)",
+        }),
+      })
+        .then(() => refreshIdeas())
+        .catch(() => {
+          autoRequeuedRef.current.delete(idea.id); // allow a retry next tick
+        });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [now]);
+
   const compactGpuQueue = [
     ...(currentRunIdea ? [currentRunIdea] : []),
     ...queuedIdeas.slice(0, 3),
@@ -1176,7 +1049,7 @@ export default function LaunchCodexPage() {
 
   // ----- Queue health diagnosis ---------------------------------------------
   // Derived purely from existing client state (no new polls). The operator
-  // cockpit is meant to read "what should I do next?" at a glance, so this
+  // home dashboard is meant to read "what should I do next?" at a glance, so this
   // collapses the live signals into one status + one next-action sentence.
   // Priority order matters: most actionable / least ambiguous state wins.
   const stuckCount = staleRunningIdeas.length;
@@ -1224,10 +1097,10 @@ export default function LaunchCodexPage() {
   } else if (runningIdeas.length > 0 && arqAlive && stuckCount > 0) {
     queueHealth = {
       state: "remote-mixed",
-      label: "Remote live, some stuck",
-      nextAction: `${stuckCount} marked running with no supervisor — requeue them.`,
-      tone: "warn",
-      badge: "mixed",
+      label: "Remote live, self-healing",
+      nextAction: `Box is training fine. ${stuckCount} stale marker${stuckCount === 1 ? "" : "s"} being auto-requeued — nothing to do.`,
+      tone: "ok",
+      badge: "healing",
     };
   } else if (
     runningIdeas.length > 0 &&
@@ -1245,11 +1118,11 @@ export default function LaunchCodexPage() {
   } else if (runningIdeas.length > 0 && !arqAlive && liveRunCount === 0) {
     queueHealth = {
       state: "stale-local",
-      label: "Stale local state",
+      label: "Stale run, auto-requeuing",
       nextAction:
-        "Marked running with no live supervisor and no remote arq — requeue or reset.",
-      tone: "alert",
-      badge: "stuck",
+        "Marked running with no supervisor and no remote arq — auto-requeuing to the queue.",
+      tone: "warn",
+      badge: "healing",
     };
   } else if (queuedIdeas.length > 0 && runningIdeas.length === 0 && !arqAlive) {
     queueHealth = {
@@ -1384,25 +1257,22 @@ export default function LaunchCodexPage() {
       </ul>
     );
 
-  // Baseline-vs-experiment val-loss comparison drawn under a finished idea.
-  // Lower loss = better. The axis is zoomed around the three values so the
-  // (tiny) differences are actually visible.
+  // Final A/B result under a finished idea. Just the mark (verdict badge) and
+  // the numbers — no loss bars, no training curve. The verdict carries the
+  // result at a glance; the deltas tell you the size and direction.
+  const Row = ({ label, val }: { label: string; val: number }) => (
+    <>
+      <dt className="text-[#faf9f6]/55">{label}</dt>
+      <dd className="font-mono text-[#faf9f6]/85">{val.toFixed(4)}</dd>
+    </>
+  );
   const renderResult = (r: Result) => {
-    const rows: { label: string; val: number | null; kind: "ctrl" | "trt" }[] = [
-      { label: "Baseline (ctrl)", val: r.controlVal, kind: "ctrl" },
-      { label: "Experiment", val: r.treatmentVal, kind: "trt" },
-      { label: "Baseline₂ (ctrl2)", val: r.ctrl2Val, kind: "ctrl" },
+    const rows: { label: string; val: number | null }[] = [
+      { label: "Baseline (ctrl)", val: r.controlVal },
+      { label: "Experiment", val: r.treatmentVal },
+      { label: "Baseline (ctrl2)", val: r.ctrl2Val },
     ];
-    const vals = rows.map((x) => x.val).filter((v): v is number => v != null);
-    if (vals.length === 0) return null;
-    const min = Math.min(...vals);
-    const max = Math.max(...vals);
-    const span = max - min || 1;
-    const pad = span * 0.6 + 1e-6;
-    const axisMin = min - pad;
-    const axisMax = max + pad;
-    const pct = (v: number) =>
-      Math.max(2, Math.min(100, ((v - axisMin) / (axisMax - axisMin)) * 100));
+    if (rows.every((x) => x.val == null)) return null;
 
     const verdict = r.verdict || "—";
     const vColor =
@@ -1427,42 +1297,22 @@ export default function LaunchCodexPage() {
       <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-3">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-[0.2em] text-[#faf9f6]/40">
-            val loss · baseline vs experiment
+            A/B result
           </span>
           <span
+            title={verdictMeta(verdict).help || verdict}
             className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${vColor}`}
           >
-            {verdict}
+            {verdictMeta(verdict).label}
           </span>
         </div>
-        <div className="space-y-1.5">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
           {rows.map((row) =>
             row.val == null ? null : (
-              <div key={row.label} className="flex items-center gap-2">
-                <span className="w-32 shrink-0 text-[11px] text-[#faf9f6]/55">
-                  {row.label}
-                </span>
-                <div className="relative h-3 flex-1 overflow-hidden rounded-full bg-white/10">
-                  <div
-                    className={`h-full rounded-full ${
-                      row.kind === "trt"
-                        ? verdict === "WIN"
-                          ? "bg-emerald-400/80"
-                          : verdict === "DRIFT" || verdict === "FAIL"
-                            ? "bg-red-400/70"
-                            : "bg-sky-400/80"
-                        : "bg-[#faf9f6]/30"
-                    }`}
-                    style={{ width: `${pct(row.val)}%` }}
-                  />
-                </div>
-                <span className="w-16 shrink-0 text-right font-mono text-[11px] text-[#faf9f6]/80">
-                  {row.val.toFixed(4)}
-                </span>
-              </div>
+              <Row key={row.label} label={row.label} val={row.val} />
             )
           )}
-        </div>
+        </dl>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
           <span className="text-[#faf9f6]/40">
             Δ vs ctrl{" "}
@@ -1482,9 +1332,9 @@ export default function LaunchCodexPage() {
     );
   };
 
-  // One idea row — the title, status badge, action buttons, and (for finished
-  // ideas) the final-loss summary bars. Used by every grouped list so the cards
-  // stay identical wherever they appear.
+  // One idea row — the title, status badge, action buttons, and (if the A/B
+  // has finished) the verdict + numbers. Used by every grouped list so the
+  // cards stay identical wherever they appear.
   const renderIdeaCard = (idea: Idea, extra?: ReactNode) => {
     const implementSessionName = IMPLEMENT_SESSION_PREFIX + idea.id;
     const runSessionName = RUN_SESSION_PREFIX + idea.id;
@@ -1619,9 +1469,15 @@ export default function LaunchCodexPage() {
           every agent/API at that repo (its ideas, queue, autorun, GPU box). */}
       <aside className="hidden w-60 shrink-0 flex-col border-r border-white/10 bg-black/20 px-4 py-6 md:flex">
         <div className="flex items-center justify-between px-1">
-          <div className="text-sm font-semibold tracking-tight text-[#faf9f6]">
+          {/* Wordmark doubles as "home" — click to return to the dashboard. */}
+          <button
+            type="button"
+            onClick={() => setView("home")}
+            title="Back to home"
+            className="-mx-1 rounded-md px-1 text-sm font-semibold tracking-tight text-[#faf9f6] transition hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20"
+          >
             VoidSpark
-          </div>
+          </button>
           <button
             type="button"
             onClick={handlePickFolder}
@@ -1633,6 +1489,34 @@ export default function LaunchCodexPage() {
             <span className="text-sm leading-none">{addRepoPicking ? "…" : "+"}</span>
           </button>
         </div>
+
+        {/* Top-level views — home (dashboard) and analytics. */}
+        <nav className="mt-6 flex flex-col gap-1">
+          {([
+            { id: "home", label: "Home", icon: "▣" },
+            { id: "analytics", label: "Analytics", icon: "📊" },
+          ] as { id: View; label: string; icon: string }[]).map((item) => {
+            const active = view === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setView(item.id)}
+                className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition ${
+                  active
+                    ? "bg-white/[0.08] text-[#faf9f6]"
+                    : "text-[#faf9f6]/55 hover:bg-white/[0.04] hover:text-white"
+                }`}
+              >
+                <span aria-hidden className="text-[11px] opacity-70">
+                  {item.icon}
+                </span>
+                <span className="font-medium">{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
         <div className="mt-6 px-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/40">
           Projects
         </div>
@@ -1790,6 +1674,9 @@ export default function LaunchCodexPage() {
         )}
       </aside>
 
+      {view === "analytics" ? (
+        <AnalyticsView onHome={() => setView("home")} />
+      ) : (
       <main className="min-h-screen flex-1 bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
         <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10">
         {/* Uncommon controls (agent, headless, prompt files) live behind this
@@ -2211,24 +2098,17 @@ export default function LaunchCodexPage() {
           ) : (
             <>
               {staleRunningIdeas.length > 0 && (
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-orange-300/20 bg-orange-300/[0.06] px-3 py-2.5">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-orange-200/80">
-                      Stale running group · {staleRunningIdeas.length}
-                    </p>
-                    <p className="mt-0.5 text-xs text-[#faf9f6]/45">
-                      Marked running with no live supervisor
-                      {arqAlive && currentRunIdea ? "; current remote run excluded." : "."}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleRequeueStaleRuns}
-                    disabled={bulkRequeueBusy}
-                    className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {bulkRequeueBusy ? "Requeuing…" : "Requeue stale"}
-                  </button>
+                <div className="mt-4 flex items-center gap-2 rounded-lg border border-orange-300/20 bg-orange-300/[0.06] px-3 py-2.5">
+                  <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-orange-300" />
+                  <p className="text-xs text-[#faf9f6]/55">
+                    <span className="font-semibold text-orange-200/80">
+                      {staleRunningIdeas.length} stale run
+                      {staleRunningIdeas.length === 1 ? "" : "s"}
+                    </span>{" "}
+                    — marked running with no live supervisor. Auto-requeuing to
+                    the queue
+                    {arqAlive && currentRunIdea ? " (current remote run excluded)" : ""}.
+                  </p>
                 </div>
               )}
 
@@ -2550,7 +2430,7 @@ export default function LaunchCodexPage() {
                   Finished experiments
                 </h2>
                 <p className="text-[11px] text-[#faf9f6]/40">
-                  Completed A/Bs with the full validation-loss curve, newest first.
+                  Completed A/Bs — verdict and deltas, newest first.
                 </p>
               </div>
             </div>
@@ -2566,9 +2446,7 @@ export default function LaunchCodexPage() {
           ) : (
             <>
               <ul className="space-y-2">
-                {finishedPreview.map((idea) =>
-                  renderIdeaCard(idea, <TrainingCurve id={idea.id} />)
-                )}
+                {finishedPreview.map((idea) => renderIdeaCard(idea))}
               </ul>
               {finishedIdeas.length > finishedPreview.length && (
                 <button
@@ -2599,6 +2477,7 @@ export default function LaunchCodexPage() {
           onClose={() => setOpenFile(null)}
         />
       </main>
+      )}
     </div>
   );
 }

@@ -32,11 +32,21 @@ export const AGENTS: Record<AgentId, AgentDef> = {
   // Default. `cmf` in the user's shell — Claude Code routed to MiniMax-M3.
   // `claude-minimax-free` execs `claude --dangerously-skip-permissions "$@"`,
   // so appending `-p` gives non-interactive print mode that exits when done.
+  //
+  // `--output-format stream-json --verbose` makes print mode emit one JSON event
+  // per step (tool call, message, result) in REAL TIME instead of staying silent
+  // until the very end. That's what makes the tmux pane (and the UI log viewer,
+  // which pretty-prints these events) actually show what the agent is doing.
+  // The process still exits on completion, so the onExit curl + self-kill run.
   minimax: {
     id: 'minimax',
     label: 'MiniMax (cmf)',
     cmd: 'claude-minimax-free',
-    headlessCmd: 'claude-minimax-free -p',
+    // `< /dev/null` gives the agent an immediate stdin EOF — without it print
+    // mode waits 3s for piped input and logs a "no stdin data" warning on every
+    // launch. The prompt still arrives as the trailing positional arg.
+    headlessCmd:
+      'claude-minimax-free -p --output-format stream-json --verbose < /dev/null',
   },
   codex: {
     id: 'codex',
