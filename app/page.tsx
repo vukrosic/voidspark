@@ -304,6 +304,19 @@ export default function LaunchCodexPage() {
   const [projects, setProjects] = useState<{ id: string; name: string; repoPath: string }[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>("");
   const [projectSwitching, setProjectSwitching] = useState<boolean>(false);
+  // Sidebar "Add repo" form. Hidden by default; the + button opens the native
+  // folder picker, then surfaces this form pre-filled.
+  const [addRepoOpen, setAddRepoOpen] = useState<boolean>(false);
+  const [addRepoPath, setAddRepoPath] = useState<string>("");
+  const [addRepoName, setAddRepoName] = useState<string>("");
+  const [addRepoBusy, setAddRepoBusy] = useState<boolean>(false);
+  const [addRepoPicking, setAddRepoPicking] = useState<boolean>(false);
+  const [addRepoError, setAddRepoError] = useState<string>("");
+  // Disconnect (remove) flow. `confirmRemoveId` is set when the user has
+  // clicked × on a row and is being asked to confirm; clicking it again (or
+  // Cancel) clears it. `removeRepoBusy` is the id currently in flight.
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [removeRepoBusy, setRemoveRepoBusy] = useState<string | null>(null);
   // Auto-implement: when on, Proposed ideas get implemented automatically (up to
   // a parallel cap). Defaults ON — optimistic so the toggle reads "on" before
   // the first state fetch resolves.
@@ -319,6 +332,13 @@ export default function LaunchCodexPage() {
   );
   // Settings popover (uncommon controls: agent, headless, prompt files).
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [expandedIdeaGroups, setExpandedIdeaGroups] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [runnerExtraOpen, setRunnerExtraOpen] = useState<boolean>(false);
+  const [showAllFinished, setShowAllFinished] = useState<boolean>(false);
+  const [gpuQueueExpanded, setGpuQueueExpanded] = useState<boolean>(false);
+  const [bulkRequeueBusy, setBulkRequeueBusy] = useState<boolean>(false);
   const [implementing, setImplementing] = useState<string | null>(null);
   const [attaching, setAttaching] = useState<string | null>(null);
   const [ideaActionMsg, setIdeaActionMsg] = useState("");
@@ -482,6 +502,15 @@ export default function LaunchCodexPage() {
     },
     [fetchLog]
   );
+
+  const toggleIdeaGroup = useCallback((key: string) => {
+    setExpandedIdeaGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     refreshSessions();
@@ -755,6 +784,129 @@ export default function LaunchCodexPage() {
     }
   };
 
+  // Open the OS native folder picker. On confirm, returns the absolute path
+  // and pre-fills the form. On cancel, does nothing. On no-GUI / spawn
+  // failure, surfaces a clear message so the user knows to paste a path.
+  const handlePickFolder = async () => {
+    if (addRepoPicking) return;
+    setAddRepoPicking(true);
+    setAddRepoError("");
+    try {
+      const response = await fetch("/api/projects/pick", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (data?.canceled) return; // user closed the dialog — silent
+      if (!response.ok || !data?.success || typeof data.path !== "string") {
+        setAddRepoError(
+          data?.error
+            ? `Native picker unavailable: ${data.error}`
+            : "Native picker unavailable — paste the path manually."
+        );
+        setAddRepoOpen(true);
+        return;
+      }
+      setAddRepoPath(data.path);
+      setAddRepoOpen(true);
+    } catch {
+      setAddRepoError("Couldn't reach the picker — is the dev server running?");
+      setAddRepoOpen(true);
+    } finally {
+      setAddRepoPicking(false);
+    }
+  };
+
+  // Register a new repo folder from the sidebar. Validates server-side (path
+  // exists, is a directory, not already registered) then auto-activates the new
+  // entry so the loop points at it immediately.
+  const handleAddProject = async () => {
+    if (addRepoBusy) return;
+    const name = addRepoName.trim() || addRepoPath.split("/").filter(Boolean).pop() || "new-repo";
+    setAddRepoBusy(true);
+    setAddRepoError("");
+    try {
+      const response = await fetch("/api/projects/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ add: { name, repoPath: addRepoPath.trim() } }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        const code = data?.error as string | undefined;
+        const msg =
+          code === "path-not-found"
+            ? "That folder doesn't exist on disk."
+            : code === "path-not-directory"
+            ? "That path is a file, not a folder."
+            : code === "invalid-path"
+            ? "Enter an absolute path to a folder."
+            : code === "invalid-name"
+            ? "Give the project a name."
+            : "Couldn't add that project.";
+        setAddRepoError(msg);
+        return;
+      }
+      if (Array.isArray(data.projects)) setProjects(data.projects);
+      // Auto-activate the new entry so the loop points at it immediately.
+      // Fire-and-forget: the project list already shows a `projectSwitching`
+      // spinner for the per-project API repulls, so closing the form here is
+      // the right UX — we don't want the "Adding…" state to be gated on a slow
+      // switch (e.g. first-hit route compile on the new repo in Next.js dev).
+      const added = (data as { added?: { id: string } }).added;
+      if (added?.id) {
+        void handleSwitchProject(added.id);
+      }
+      // Reset the form.
+      setAddRepoPath("");
+      setAddRepoName("");
+      setAddRepoOpen(false);
+    } catch {
+      setAddRepoError("Network error — is the dev server running?");
+    } finally {
+      setAddRepoBusy(false);
+    }
+  };
+
+  // Disconnect (remove) a project from the registry. This is purely a
+  // VoidSpark-side edit — the target repo's ideas, flags, and code are
+  // untouched, so re-adding the same path later picks up where it left off.
+  // If the removed project was active, the server picks a new active one and
+  // the client re-pulls per-project state to match.
+  const handleRemoveProject = async (id: string) => {
+    if (removeRepoBusy) return;
+    setRemoveRepoBusy(id);
+    try {
+      const response = await fetch("/api/projects/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ remove: { id } }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        // unknown id or network — leave the row in place so the user can retry
+        return;
+      }
+      if (Array.isArray(data.projects)) setProjects(data.projects);
+      const newActive = data.activeId as string | undefined;
+      if (newActive && newActive !== activeProjectId) {
+        // Server already changed the active pointer; resync client + repull
+        // everything that is per-project.
+        setActiveProjectId(newActive);
+        refreshIdeas();
+        refreshSessions();
+        fetch("/api/runner-extra/", { method: "POST" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            if (d && typeof d.text === "string") setRunnerExtra(d.text);
+          })
+          .catch(() => {});
+      }
+      setConfirmRemoveId(null);
+    } catch {
+      /* network — leave the row in place */
+    } finally {
+      setRemoveRepoBusy(null);
+    }
+  };
+
   // Save the runner extra-instructions. Applies to the NEXT runner launch
   // (autorun tick or manual "Run next") — not a run already in flight.
   const handleSaveRunnerExtra = async () => {
@@ -862,6 +1014,40 @@ export default function LaunchCodexPage() {
     }
   };
 
+  const handleRequeueStaleRuns = async () => {
+    const stale = staleRunningIdeas.map((idea) => idea.id);
+    if (stale.length === 0 || bulkRequeueBusy) return;
+    setBulkRequeueBusy(true);
+    setRunMessage("");
+    try {
+      const results = await Promise.all(
+        stale.map(async (slug) => {
+          const response = await fetch("/api/flip/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              slug,
+              status: "needs-run",
+              note: "bulk requeued stale GPU run from UI",
+            }),
+          });
+          return response.ok;
+        })
+      );
+      const ok = results.filter(Boolean).length;
+      setRunMessage(
+        ok === stale.length
+          ? `Requeued ${ok} stale run${ok === 1 ? "" : "s"}.`
+          : `Requeued ${ok}/${stale.length} stale runs; refresh to inspect the rest.`
+      );
+    } catch {
+      setRunMessage("Bulk requeue failed.");
+    } finally {
+      setBulkRequeueBusy(false);
+      refreshIdeas();
+    }
+  };
+
   const handleAttach = async (name: string) => {
     setAttaching(name);
     setSessionMsg("");
@@ -921,6 +1107,23 @@ export default function LaunchCodexPage() {
     .sort((a, b) => (a.updated || a.id).localeCompare(b.updated || b.id));
   const gpuQueue = [...runningIdeas, ...queuedIdeas];
   const gpuBusy = runningIdeas.length > 0;
+  const currentLogSlug = gpuInfo?.logName?.replace(/\.log$/, "") ?? "";
+  const currentRunIdea =
+    runningIdeas.find((idea) => idea.id === currentLogSlug) ??
+    runningIdeas[0] ??
+    null;
+  const staleRunningIdeas = runningIdeas.filter((idea) => {
+    const sessionName = RUN_SESSION_PREFIX + idea.id;
+    const isRemoteCurrent = arqAlive && currentRunIdea?.id === idea.id;
+    return !liveSessions.has(sessionName) && !isRemoteCurrent;
+  });
+  const compactGpuQueue = [
+    ...(currentRunIdea ? [currentRunIdea] : []),
+    ...queuedIdeas.slice(0, 3),
+  ].filter(
+    (idea, idx, arr) => arr.findIndex((candidate) => candidate.id === idea.id) === idx
+  );
+  const visibleGpuQueue = gpuQueueExpanded ? gpuQueue : compactGpuQueue;
 
   // Group ideas into clear buckets instead of one scattered list. needs-run /
   // running live in the GPU section below, and finished experiments get their
@@ -956,6 +1159,7 @@ export default function LaunchCodexPage() {
   const finishedIdeas = ideas
     .filter((i) => FINISHED_STATUSES.has(i.status))
     .sort((a, b) => (b.updated || b.id).localeCompare(a.updated || a.id));
+  const finishedPreview = showAllFinished ? finishedIdeas : finishedIdeas.slice(0, 5);
 
   // Split the flat tmux list by what each session is for, so idea-generation
   // sessions sit with the Ideas section and GPU-run supervisors with the GPU
@@ -975,10 +1179,7 @@ export default function LaunchCodexPage() {
   // cockpit is meant to read "what should I do next?" at a glance, so this
   // collapses the live signals into one status + one next-action sentence.
   // Priority order matters: most actionable / least ambiguous state wins.
-  const stuckCount = runningIdeas.filter((i) => {
-    const sessionName = RUN_SESSION_PREFIX + i.id;
-    return !liveSessions.has(sessionName);
-  }).length;
+  const stuckCount = staleRunningIdeas.length;
   const liveRunCount = runSessions.length;
   const noWork = runningIdeas.length === 0 && queuedIdeas.length === 0;
 
@@ -1312,7 +1513,7 @@ export default function LaunchCodexPage() {
               {idea.title}
             </p>
             {idea.plain && (
-              <p className="mt-1 text-xs text-[#faf9f6]/55">{idea.plain}</p>
+              <p className="mt-1 line-clamp-2 text-xs text-[#faf9f6]/55">{idea.plain}</p>
             )}
           </button>
           <div className="flex shrink-0 flex-col items-end gap-2">
@@ -1417,8 +1618,20 @@ export default function LaunchCodexPage() {
       {/* Project sidebar — pick which repo the loop drives. Switching re-points
           every agent/API at that repo (its ideas, queue, autorun, GPU box). */}
       <aside className="hidden w-60 shrink-0 flex-col border-r border-white/10 bg-black/20 px-4 py-6 md:flex">
-        <div className="px-1 text-sm font-semibold tracking-tight text-[#faf9f6]">
-          VoidSpark
+        <div className="flex items-center justify-between px-1">
+          <div className="text-sm font-semibold tracking-tight text-[#faf9f6]">
+            VoidSpark
+          </div>
+          <button
+            type="button"
+            onClick={handlePickFolder}
+            disabled={addRepoPicking}
+            aria-busy={addRepoPicking}
+            title="Add a repo folder (opens a folder picker)"
+            className="flex h-6 w-6 items-center justify-center rounded-md border border-white/12 bg-white/[0.03] text-[#faf9f6]/60 transition hover:border-white/30 hover:text-white disabled:opacity-50"
+          >
+            <span className="text-sm leading-none">{addRepoPicking ? "…" : "+"}</span>
+          </button>
         </div>
         <div className="mt-6 px-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/40">
           Projects
@@ -1429,37 +1642,152 @@ export default function LaunchCodexPage() {
           )}
           {projects.map((p) => {
             const active = p.id === activeProjectId;
+            const confirming = confirmRemoveId === p.id;
+            const busy = removeRepoBusy === p.id;
             return (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => handleSwitchProject(p.id)}
-                disabled={projectSwitching}
-                title={p.repoPath}
-                className={`flex flex-col items-start rounded-md px-2 py-1.5 text-left text-xs transition disabled:opacity-50 ${
-                  active
-                    ? "bg-white/[0.08] text-[#faf9f6]"
-                    : "text-[#faf9f6]/55 hover:bg-white/[0.04] hover:text-white"
-                }`}
-              >
-                <span className="flex w-full items-center gap-1.5">
-                  <span
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                      active ? "bg-emerald-400" : "bg-[#faf9f6]/25"
-                    }`}
-                  />
-                  <span className="truncate font-medium">{p.name}</span>
-                </span>
-                <span className="mt-0.5 w-full truncate pl-3 text-[10px] text-[#faf9f6]/30">
-                  {p.repoPath}
-                </span>
-              </button>
+              <div key={p.id} className="group relative">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchProject(p.id)}
+                  disabled={projectSwitching}
+                  title={p.repoPath}
+                  className={`flex w-full flex-col items-start rounded-md px-2 py-1.5 pr-7 text-left text-xs transition disabled:opacity-50 ${
+                    active
+                      ? "bg-white/[0.08] text-[#faf9f6]"
+                      : "text-[#faf9f6]/55 hover:bg-white/[0.04] hover:text-white"
+                  }`}
+                >
+                  <span className="flex w-full items-center gap-1.5">
+                    <span
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                        active ? "bg-emerald-400" : "bg-[#faf9f6]/25"
+                      }`}
+                    />
+                    <span className="truncate font-medium">{p.name}</span>
+                  </span>
+                  <span className="mt-0.5 w-full truncate pl-3 text-[10px] text-[#faf9f6]/30">
+                    {p.repoPath}
+                  </span>
+                </button>
+                {/* Disconnect button (×). Hidden by default, revealed on row
+                    hover or while the confirm step is showing. Lives outside
+                    the switch button so its click doesn't trigger a switch. */}
+                {!confirming && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRemoveId(p.id)}
+                    title="Disconnect this repo from VoidSpark (registry only — files stay put)"
+                    aria-label={`Disconnect ${p.name}`}
+                    className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded text-[#faf9f6]/30 opacity-0 transition hover:bg-white/[0.08] hover:text-rose-300 group-hover:opacity-100 focus:opacity-100"
+                  >
+                    <span className="text-base leading-none">×</span>
+                  </button>
+                )}
+                {confirming && (
+                  <div className="absolute inset-0 flex items-center justify-end gap-1.5 rounded-md bg-black/85 px-2 backdrop-blur-sm">
+                    <span className="mr-auto text-[10px] text-[#faf9f6]/70">
+                      Disconnect?
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveProject(p.id)}
+                      disabled={busy}
+                      className="rounded bg-rose-500/80 px-2 py-0.5 text-[10px] font-semibold text-white transition hover:bg-rose-500 disabled:opacity-50"
+                    >
+                      {busy ? "…" : "Yes"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmRemoveId(null)}
+                      disabled={busy}
+                      className="rounded px-2 py-0.5 text-[10px] text-[#faf9f6]/70 transition hover:text-white disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
-        <p className="mt-4 px-2 text-[10px] leading-relaxed text-[#faf9f6]/30">
-          Add repos in <span className="font-mono">projects.json</span>.
-        </p>
+        {addRepoOpen && (
+          <div className="mt-3 flex flex-col gap-2 rounded-md border border-white/10 bg-white/[0.03] p-2">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={addRepoPath}
+                onChange={(e) => setAddRepoPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAddProject();
+                  if (e.key === "Escape") {
+                    setAddRepoOpen(false);
+                    setAddRepoError("");
+                  }
+                }}
+                placeholder="/absolute/path/to/repo"
+                className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-2 py-1.5 font-mono text-[11px] text-[#faf9f6] placeholder-[#faf9f6]/25 focus:border-white/30 focus:outline-none"
+                disabled={addRepoBusy}
+              />
+              <button
+                type="button"
+                onClick={handlePickFolder}
+                disabled={addRepoPicking}
+                title="Open the folder picker"
+                className="shrink-0 rounded border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white disabled:opacity-50"
+              >
+                {addRepoPicking ? "…" : "Pick…"}
+              </button>
+            </div>
+            <input
+              type="text"
+              value={addRepoName}
+              onChange={(e) => setAddRepoName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleAddProject();
+                if (e.key === "Escape") {
+                  setAddRepoOpen(false);
+                  setAddRepoError("");
+                }
+              }}
+              placeholder="Display name (optional)"
+              className="w-full rounded border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-[#faf9f6] placeholder-[#faf9f6]/25 focus:border-white/30 focus:outline-none"
+              disabled={addRepoBusy}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleAddProject}
+                disabled={addRepoBusy || !addRepoPath.trim()}
+                className="flex-1 rounded bg-white/[0.08] px-2 py-1.5 text-[11px] font-semibold text-[#faf9f6] transition hover:bg-white/[0.14] disabled:opacity-40"
+              >
+                {addRepoBusy ? "Adding…" : "Add"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAddRepoOpen(false);
+                  setAddRepoError("");
+                  setAddRepoPath("");
+                  setAddRepoName("");
+                }}
+                disabled={addRepoBusy}
+                className="rounded px-2 py-1.5 text-[11px] text-[#faf9f6]/55 transition hover:text-white disabled:opacity-40"
+              >
+                Cancel
+              </button>
+            </div>
+            {addRepoError && (
+              <p className="px-0.5 text-[10px] leading-snug text-rose-300/90">
+                {addRepoError}
+              </p>
+            )}
+          </div>
+        )}
+        {!addRepoOpen && (
+          <p className="mt-4 px-2 text-[10px] leading-relaxed text-[#faf9f6]/30">
+            Click <span className="font-mono">+</span> to pick a repo folder.
+          </p>
+        )}
       </aside>
 
       <main className="min-h-screen flex-1 bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
@@ -1643,17 +1971,46 @@ export default function LaunchCodexPage() {
             <div className="space-y-6">
               {ideaGroups
                 .filter((group) => group.ideas.length > 0)
-                .map((group) => (
+                .map((group) => {
+                  const expanded = expandedIdeaGroups.has(group.key);
+                  const visibleIdeas = expanded ? group.ideas : group.ideas.slice(0, 2);
+                  const hiddenCount = group.ideas.length - visibleIdeas.length;
+                  return (
                   <div key={group.key}>
-                    <h3 className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200/50">
-                      {group.label}
-                      <span className="text-[#faf9f6]/30">({group.ideas.length})</span>
-                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => toggleIdeaGroup(group.key)}
+                      aria-expanded={expanded}
+                      className="mb-2 flex w-full items-center justify-between gap-3 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-amber-300/20"
+                    >
+                      <span className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200/50">
+                        <span aria-hidden className="font-mono text-[#faf9f6]/30">
+                          {expanded ? "−" : "+"}
+                        </span>
+                        {group.label}
+                        <span className="text-[#faf9f6]/30">({group.ideas.length})</span>
+                      </span>
+                      {hiddenCount > 0 && (
+                        <span className="text-[10px] uppercase tracking-[0.18em] text-[#faf9f6]/35">
+                          {hiddenCount} hidden
+                        </span>
+                      )}
+                    </button>
                     <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {group.ideas.map((idea) => renderIdeaCard(idea))}
+                      {visibleIdeas.map((idea) => renderIdeaCard(idea))}
                     </ul>
+                    {hiddenCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => toggleIdeaGroup(group.key)}
+                        className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-amber-300/20"
+                      >
+                        Show {hiddenCount} more
+                      </button>
+                    )}
                   </div>
-                ))}
+                );
+                })}
             </div>
           )}
 
@@ -1788,15 +2145,37 @@ export default function LaunchCodexPage() {
 
           {/* Operator instructions appended to the GPU runner agent's prompt —
               e.g. a one-off Vast.ai bash command. Applies to the next launch. */}
-          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02] p-3">
-            <div className="flex items-center justify-between">
-              <label
-                htmlFor="runner-extra"
-                className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/55"
-              >
-                Runner instructions · appended to the Vast.ai agent prompt
-              </label>
-              <div className="flex items-center gap-2">
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02]">
+            <button
+              type="button"
+              onClick={() => setRunnerExtraOpen((v) => !v)}
+              aria-expanded={runnerExtraOpen}
+              className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
+            >
+              <span className="min-w-0">
+                <span className="block text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/55">
+                  Runner instructions
+                </span>
+                <span className="mt-0.5 block truncate text-[11px] text-[#faf9f6]/35">
+                  {runnerExtra
+                    ? "Custom text saved for the next Vast.ai runner launch."
+                    : "Optional one-off text appended to the next runner prompt."}
+                </span>
+              </span>
+              <span className="shrink-0 font-mono text-sm text-[#faf9f6]/40">
+                {runnerExtraOpen ? "−" : "+"}
+              </span>
+            </button>
+            {runnerExtraOpen && (
+              <div className="border-t border-white/10 p-3 pt-2">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <label
+                    htmlFor="runner-extra"
+                    className="text-[10px] uppercase tracking-[0.18em] text-[#faf9f6]/35"
+                  >
+                    Appended prompt text
+                  </label>
+                  <div className="flex items-center gap-2">
                 {runnerExtraMsg && (
                   <span className="text-[11px] text-emerald-200/80">
                     {runnerExtraMsg}
@@ -1811,16 +2190,18 @@ export default function LaunchCodexPage() {
                   {runnerExtraSaving ? "Saving…" : "Save"}
                 </button>
               </div>
-            </div>
-            <textarea
-              id="runner-extra"
-              value={runnerExtra}
-              onChange={(e) => setRunnerExtra(e.target.value)}
-              rows={3}
-              spellCheck={false}
-              placeholder={'e.g. Before training, run on the box:\nnvidia-smi; export TORCHDYNAMO_DISABLE=1'}
-              className="mt-2 w-full resize-y rounded-md border border-white/10 bg-[#1f1e1d] px-3 py-2 font-mono text-xs text-[#faf9f6]/90 placeholder:text-[#faf9f6]/30 focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
-            />
+                </div>
+                <textarea
+                  id="runner-extra"
+                  value={runnerExtra}
+                  onChange={(e) => setRunnerExtra(e.target.value)}
+                  rows={3}
+                  spellCheck={false}
+                  placeholder={'e.g. Before training, run on the box:\nnvidia-smi; export TORCHDYNAMO_DISABLE=1'}
+                  className="w-full resize-y rounded-md border border-white/10 bg-[#1f1e1d] px-3 py-2 font-mono text-xs text-[#faf9f6]/90 placeholder:text-[#faf9f6]/30 focus:outline-none focus:ring-2 focus:ring-cyan-300/30"
+                />
+              </div>
+            )}
           </div>
 
           {gpuQueue.length === 0 ? (
@@ -1828,91 +2209,141 @@ export default function LaunchCodexPage() {
               No ready GPU work.
             </p>
           ) : (
-            <ul className="mt-4 space-y-2">
-              {gpuQueue.map((idea, index) => {
-                const sessionName = RUN_SESSION_PREFIX + idea.id;
-                const isRunLive = liveSessions.has(sessionName);
-                const isRunStuck = idea.status === "running" && !isRunLive;
-
-                return (
-                  <li
-                    key={idea.id}
-                    className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5"
+            <>
+              {staleRunningIdeas.length > 0 && (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-orange-300/20 bg-orange-300/[0.06] px-3 py-2.5">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-orange-200/80">
+                      Stale running group · {staleRunningIdeas.length}
+                    </p>
+                    <p className="mt-0.5 text-xs text-[#faf9f6]/45">
+                      Marked running with no live supervisor
+                      {arqAlive && currentRunIdea ? "; current remote run excluded." : "."}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRequeueStaleRuns}
+                    disabled={bulkRequeueBusy}
+                    className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpenFile({ path: idea.path, title: idea.title })
-                      }
-                      className="min-w-0 flex-1 text-left transition hover:opacity-80 focus:outline-none"
+                    {bulkRequeueBusy ? "Requeuing…" : "Requeue stale"}
+                  </button>
+                </div>
+              )}
+
+              {!gpuQueueExpanded && gpuQueue.length > compactGpuQueue.length && (
+                <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-[#faf9f6]/35">
+                  Showing current run and next queued items
+                </p>
+              )}
+
+              <ul className="mt-3 space-y-2">
+                {visibleGpuQueue.map((idea) => {
+                  const sessionName = RUN_SESSION_PREFIX + idea.id;
+                  const isRunLive = liveSessions.has(sessionName);
+                  const isCurrentRun =
+                    idea.status === "running" && currentRunIdea?.id === idea.id;
+                  const isRunStuck = staleRunningIdeas.some((stale) => stale.id === idea.id);
+                  const queuePosition = queuedIdeas.findIndex((queued) => queued.id === idea.id) + 1;
+
+                  return (
+                    <li
+                      key={idea.id}
+                      className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5"
                     >
-                      <p className="truncate text-sm font-semibold text-[#faf9f6]">
-                        {idea.title}
-                      </p>
-                      <p className="mt-1 font-mono text-[11px] text-[#faf9f6]/35">
-                        {idea.id}
-                      </p>
-                    </button>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {timeInState(idea.updated) && (
-                        <span
-                          title={
-                            idea.status === "running"
-                              ? "time running"
-                              : "time waiting in queue"
-                          }
-                          className="font-mono text-[10px] tabular-nums text-[#faf9f6]/45"
-                        >
-                          ⏱ {timeInState(idea.updated)}
-                        </span>
-                      )}
-                      {isRunLive && (
-                        <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.15em] text-emerald-300">
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                          running
-                        </span>
-                      )}
-                      {isRunStuck && (
-                        <span className="text-[10px] uppercase tracking-[0.15em] text-orange-300">
-                          stuck
-                        </span>
-                      )}
-                      {idea.status === "needs-run" && (
-                        <span className="rounded-full border border-cyan-300/20 bg-cyan-300/5 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] text-cyan-200/80">
-                          #{index + 1}
-                        </span>
-                      )}
-                      {isRunLive ? (
-                        <button
-                          type="button"
-                          onClick={() => handleAttach(sessionName)}
-                          disabled={attaching === sessionName}
-                          title="Attach the local supervisor tmux (SSHes the box, polls, writes evidence). Not the GPU itself — use the GPU box panel below for that."
-                          className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          {attaching === sessionName ? "..." : "Runner"}
-                        </button>
-                      ) : isRunStuck ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleReset(
-                              idea.id,
-                              "needs-run",
-                              "requeued stuck GPU run from UI"
-                            )
-                          }
-                          disabled={implementing === idea.id}
-                          className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          Requeue
-                        </button>
-                      ) : null}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenFile({ path: idea.path, title: idea.title })
+                        }
+                        className="min-w-0 flex-1 text-left transition hover:opacity-80 focus:outline-none"
+                      >
+                        <p className="truncate text-sm font-semibold text-[#faf9f6]">
+                          {idea.title}
+                        </p>
+                        <p className="mt-1 font-mono text-[11px] text-[#faf9f6]/35">
+                          {idea.id}
+                        </p>
+                      </button>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {timeInState(idea.updated) && (
+                          <span
+                            title={
+                              idea.status === "running"
+                                ? "time running"
+                                : "time waiting in queue"
+                            }
+                            className="font-mono text-[10px] tabular-nums text-[#faf9f6]/45"
+                          >
+                            ⏱ {timeInState(idea.updated)}
+                          </span>
+                        )}
+                        {isCurrentRun && (
+                          <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] text-emerald-200/90">
+                            current
+                          </span>
+                        )}
+                        {isRunLive && (
+                          <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.15em] text-emerald-300">
+                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                            runner
+                          </span>
+                        )}
+                        {isRunStuck && (
+                          <span className="text-[10px] uppercase tracking-[0.15em] text-orange-300">
+                            stuck
+                          </span>
+                        )}
+                        {idea.status === "needs-run" && queuePosition > 0 && (
+                          <span className="rounded-full border border-cyan-300/20 bg-cyan-300/5 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] text-cyan-200/80">
+                            #{queuePosition}
+                          </span>
+                        )}
+                        {isRunLive ? (
+                          <button
+                            type="button"
+                            onClick={() => handleAttach(sessionName)}
+                            disabled={attaching === sessionName}
+                            title="Attach the local supervisor tmux (SSHes the box, polls, writes evidence). Not the GPU itself — use the GPU box panel below for that."
+                            className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {attaching === sessionName ? "..." : "Runner"}
+                          </button>
+                        ) : isRunStuck ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleReset(
+                                idea.id,
+                                "needs-run",
+                                "requeued stuck GPU run from UI"
+                              )
+                            }
+                            disabled={implementing === idea.id}
+                            className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Requeue
+                          </button>
+                        ) : null}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+
+              {gpuQueue.length > compactGpuQueue.length && (
+                <button
+                  type="button"
+                  onClick={() => setGpuQueueExpanded((v) => !v)}
+                  className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
+                >
+                  {gpuQueueExpanded
+                    ? "Collapse full queue"
+                    : `Show full queue (${gpuQueue.length})`}
+                </button>
+              )}
+            </>
           )}
         </div>
 
@@ -2133,11 +2564,31 @@ export default function LaunchCodexPage() {
               No finished experiments yet.
             </p>
           ) : (
-            <ul className="space-y-2">
-              {finishedIdeas.map((idea) =>
-                renderIdeaCard(idea, <TrainingCurve id={idea.id} />)
+            <>
+              <ul className="space-y-2">
+                {finishedPreview.map((idea) =>
+                  renderIdeaCard(idea, <TrainingCurve id={idea.id} />)
+                )}
+              </ul>
+              {finishedIdeas.length > finishedPreview.length && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllFinished(true)}
+                  className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-emerald-300/20"
+                >
+                  Show {finishedIdeas.length - finishedPreview.length} older experiments
+                </button>
               )}
-            </ul>
+              {showAllFinished && finishedIdeas.length > 5 && (
+                <button
+                  type="button"
+                  onClick={() => setShowAllFinished(false)}
+                  className="mt-3 w-full text-xs uppercase tracking-[0.18em] text-[#faf9f6]/35 transition hover:text-[#faf9f6]/65"
+                >
+                  Collapse finished experiments
+                </button>
+              )}
+            </>
           )}
         </section>
       </div>

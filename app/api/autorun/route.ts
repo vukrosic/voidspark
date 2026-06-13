@@ -9,7 +9,6 @@ import { getRunnerExtra, renderRunnerExtra } from '@/lib/runnerExtra';
 
 const execFileAsync = promisify(execFile);
 const IDEAS_DIR = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
-const RUNNER_PROMPT = () => join(getActiveRepoDir(), 'autoresearch', 'prompts', 'runner.md');
 const BOX_JSON = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
 
 // One persistent runner agent owns the GPU queue while autorun is on. It reads
