@@ -876,6 +876,131 @@ export default function LaunchCodexPage() {
     (s) => !ideaSessions.includes(s) && !runSessions.includes(s)
   );
 
+  // ----- Queue health diagnosis ---------------------------------------------
+  // Derived purely from existing client state (no new polls). The operator
+  // cockpit is meant to read "what should I do next?" at a glance, so this
+  // collapses the live signals into one status + one next-action sentence.
+  // Priority order matters: most actionable / least ambiguous state wins.
+  const stuckCount = runningIdeas.filter((i) => {
+    const sessionName = RUN_SESSION_PREFIX + i.id;
+    return !liveSessions.has(sessionName);
+  }).length;
+  const liveRunCount = runSessions.length;
+  const noWork = runningIdeas.length === 0 && queuedIdeas.length === 0;
+
+  type HealthTone = "ok" | "warn" | "alert" | "info" | "muted";
+  type Health = {
+    state: string;
+    label: string;
+    nextAction: string;
+    tone: HealthTone;
+    badge: string;
+  };
+
+  let queueHealth: Health;
+  // 1. If we can't see the box at all and something is supposedly running,
+  //    every other signal is suspect — surface the telemetry gap first.
+  if (gpuUsageStale && (runningIdeas.length > 0 || arqAlive)) {
+    queueHealth = {
+      state: "telemetry-stale",
+      label: "GPU telemetry stale",
+      nextAction:
+        "Can't reach the GPU box — requeue stuck rows or check remote-box.json.",
+      tone: "warn",
+      badge: "stale",
+    };
+  } else if (noWork) {
+    queueHealth = {
+      state: "no-work",
+      label: "Queue idle",
+      nextAction:
+        "No running or ready ideas. Generate new ideas to refill the pipeline.",
+      tone: "muted",
+      badge: "idle",
+    };
+  } else if (runningIdeas.length > 0 && arqAlive && stuckCount === 0) {
+    queueHealth = {
+      state: "healthy-remote",
+      label: "Healthy remote run",
+      nextAction: `${runningIdeas.length} running on the box — attach to watch live.`,
+      tone: "ok",
+      badge: "live",
+    };
+  } else if (runningIdeas.length > 0 && arqAlive && stuckCount > 0) {
+    queueHealth = {
+      state: "remote-mixed",
+      label: "Remote live, some stuck",
+      nextAction: `${stuckCount} marked running with no supervisor — requeue them.`,
+      tone: "warn",
+      badge: "mixed",
+    };
+  } else if (
+    runningIdeas.length > 0 &&
+    arqAlive &&
+    liveRunCount === 0
+  ) {
+    queueHealth = {
+      state: "remote-active-local-stale",
+      label: "Remote active, local stale",
+      nextAction:
+        "Box is training but no local supervisor is attached — open Attach GPU.",
+      tone: "warn",
+      badge: "unattended",
+    };
+  } else if (runningIdeas.length > 0 && !arqAlive && liveRunCount === 0) {
+    queueHealth = {
+      state: "stale-local",
+      label: "Stale local state",
+      nextAction:
+        "Marked running with no live supervisor and no remote arq — requeue or reset.",
+      tone: "alert",
+      badge: "stuck",
+    };
+  } else if (queuedIdeas.length > 0 && runningIdeas.length === 0 && !arqAlive) {
+    queueHealth = {
+      state: "ready-idle",
+      label: "Ready but idle",
+      nextAction: autorunOn
+        ? "Autorun is on — waiting for the next tick to pick the first ready idea."
+        : "Turn on Autorun or press Run next to start draining the queue.",
+      tone: "info",
+      badge: "ready",
+    };
+  } else if (queuedIdeas.length > 0 && runningIdeas.length > 0) {
+    queueHealth = {
+      state: "draining",
+      label: "Queue draining",
+      nextAction: `${runningIdeas.length} running, ${queuedIdeas.length} ready — see rows below.`,
+      tone: "info",
+      badge: "draining",
+    };
+  } else {
+    queueHealth = {
+      state: "steady",
+      label: "Queue steady",
+      nextAction: "No action needed.",
+      tone: "muted",
+      badge: "ok",
+    };
+  }
+
+  // Tailwind can't pick dynamic class names from a string lookup, so resolve
+  // the per-tone styles to a literal object — keeps the JIT happy.
+  const HEALTH_TONE_STYLES: Record<HealthTone, string> = {
+    ok: "border-emerald-400/30 bg-emerald-400/[0.07] text-emerald-100",
+    warn: "border-amber-300/30 bg-amber-300/[0.07] text-amber-100",
+    alert: "border-red-400/30 bg-red-400/[0.08] text-red-100",
+    info: "border-cyan-300/30 bg-cyan-300/[0.07] text-cyan-100",
+    muted: "border-white/10 bg-white/[0.04] text-[#faf9f6]/70",
+  };
+  const HEALTH_DOT_STYLES: Record<HealthTone, string> = {
+    ok: "bg-emerald-400",
+    warn: "bg-amber-300",
+    alert: "bg-red-400",
+    info: "bg-cyan-300",
+    muted: "bg-[#faf9f6]/40",
+  };
+
   // location: where these tmux sessions live ("Local · Mac"). Each row can be
   // expanded to follow (and scroll back through) its saved log.
   const renderSessionList = (list: Session[], emptyText: string, location = "Local · Mac") =>
@@ -1466,6 +1591,48 @@ export default function LaunchCodexPage() {
                         : "Run next"}
                 </button>
               )}
+            </div>
+          </div>
+
+          {/* Queue health diagnosis — derived from existing client state. Tells
+              the operator whether to wait, attach, requeue, or fix config. */}
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="queue-health"
+            data-state={queueHealth.state}
+            className={`mt-3 flex items-start gap-3 rounded-lg border px-3 py-2.5 ${HEALTH_TONE_STYLES[queueHealth.tone]}`}
+          >
+            <span
+              aria-hidden
+              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${HEALTH_DOT_STYLES[queueHealth.tone]} ${
+                queueHealth.tone === "ok" || queueHealth.tone === "info"
+                  ? "animate-pulse"
+                  : ""
+              }`}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] opacity-70">
+                  Queue health
+                </span>
+                <span className="text-sm font-semibold text-[#faf9f6]">
+                  {queueHealth.label}
+                </span>
+                <span className="rounded-full border border-current/30 bg-black/20 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.16em] opacity-80">
+                  {queueHealth.badge}
+                </span>
+              </div>
+              <p className="mt-0.5 text-xs leading-snug">
+                {queueHealth.nextAction}
+              </p>
+              <p className="mt-1.5 font-mono text-[10px] tabular-nums opacity-70">
+                {runningIdeas.length} running · {queuedIdeas.length} ready · {stuckCount} stuck
+                {" · "}
+                {liveRunCount} supervisor
+                {" · "}arq {arqAlive ? "live" : "idle"}
+                {gpuUsageStale ? " · telemetry stale" : ""}
+              </p>
             </div>
           </div>
 
