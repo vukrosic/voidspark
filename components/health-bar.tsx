@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 
 // ---- System health bar ------------------------------------------------------
-// One sticky strip at the top of the cockpit that answers "is the loop alive?"
+// One sticky strip at the top of the dashboard that answers "is the loop alive?"
 // at a glance. Polls the read-only /api/health snapshot every 5s (workers,
 // dead panes, idea pool, throughput, GPU drainer) and /api/minimax-usage every
 // 30s (quota is a slower upstream call). The master Autoresearch toggle lives
@@ -381,22 +381,24 @@ export default function HealthBar({
           title="Status changes in the last hour, and time since the most recent one"
         />
 
-        <Chip
-          icon={<Gauge className="h-3 w-3" aria-hidden />}
-          label="MiniMax"
-          value={minimax?.ok && minimax.intervalPercent != null ? `${Math.round(minimax.intervalPercent)}% left` : "—"}
-          sub={minimax?.ok && minimax.weeklyPercent != null ? `${Math.round(minimax.weeklyPercent)}% week left` : minimax?.exhausted ? "exhausted" : ""}
-          tone={
-            !minimax?.ok
-              ? "muted"
-              : minimax.exhausted
+        {/* MiniMax quota — only shown when a MiniMax key is configured and the
+            API answered. Users without a MiniMax subscription never see it. */}
+        {minimax?.ok && (
+          <Chip
+            icon={<Gauge className="h-3 w-3" aria-hidden />}
+            label="MiniMax"
+            value={minimax.intervalPercent != null ? `${Math.round(minimax.intervalPercent)}% left` : "—"}
+            sub={minimax.weeklyPercent != null ? `${Math.round(minimax.weeklyPercent)}% week left` : minimax.exhausted ? "exhausted" : ""}
+            tone={
+              minimax.exhausted
                 ? "bad"
                 : (minimax.intervalPercent ?? 100) < 20
                   ? "warn"
                   : "ok"
-          }
-          title="MiniMax 5-hour interval quota remaining. At 0 it 429s and the launcher falls back to Codex."
-        />
+            }
+            title="MiniMax 5-hour interval quota remaining. At 0 it 429s and the launcher falls back to Codex."
+          />
+        )}
 
         <Chip
           icon={<Trophy className="h-3 w-3" aria-hidden />}

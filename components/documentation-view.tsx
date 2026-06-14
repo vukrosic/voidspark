@@ -13,18 +13,28 @@ type DocGroup = { heading: string; blurb: string; docs: Doc[] };
 
 const DOC_GROUPS: DocGroup[] = [
   {
-    heading: "About this app",
-    blurb: "Top-level orientation for the VoidSpark dashboard itself.",
+    heading: "Start here",
+    blurb: "What VoidSpark is and how to get it running.",
     docs: [
-      { path: "README.md", title: "README", hint: "What VoidSpark is, how to run it" },
-      { path: "PLAN.md", title: "PLAN", hint: "Goals + non-goals for the dashboard" },
+      { path: "README.md", title: "README", hint: "What VoidSpark is, first run, the roadmap" },
+      { path: "docs/architecture.md", title: "Architecture", hint: "The loop, the gates, the status state machine" },
     ],
   },
   {
-    heading: "Scripts",
-    blurb: "The helper shell scripts shipped vendored with this app.",
+    heading: "Guides",
+    blurb: "Set it up and point it at your work.",
     docs: [
-      { path: "scripts/README.md", title: "Scripts README", hint: "Agent launch + monitor watchdog scripts" },
+      { path: "docs/configuration.md", title: "Configuration", hint: "Env, project registry, agents, automation toggles" },
+      { path: "docs/gpu-box.md", title: "GPU box", hint: "Connect a Vast.ai / SSH box; what runs where" },
+      { path: "docs/research-repo.md", title: "The research repo", hint: "What a target repo provides (autoresearch/)" },
+    ],
+  },
+  {
+    heading: "Reference",
+    blurb: "When something needs fixing or you want the details.",
+    docs: [
+      { path: "docs/troubleshooting.md", title: "Troubleshooting", hint: "Common snags on a fresh machine + fixes" },
+      { path: "scripts/README.md", title: "Scripts", hint: "Agent launch + monitor watchdog scripts" },
     ],
   },
 ];
@@ -70,12 +80,6 @@ export default function DocumentationView({ onHome }: { onHome: () => void }) {
             <h1 className="font-mono text-2xl tracking-[0.08em] text-[#faf9f6]">
               Documentation
             </h1>
-            <p className="mt-1 text-sm text-[#faf9f6]/55">
-              Hand-written .md files that ship inside this VoidSpark app folder.
-              Click a card to open it in the side panel. Project-side docs
-              (PIPELINE, queue, brief) live in the research repo and are not
-              listed here.
-            </p>
           </div>
           <button
             type="button"

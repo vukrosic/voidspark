@@ -43,7 +43,7 @@ Overridable with `AGENT_FALLBACK_SCRIPT`.
 
 ## Monitor watchdog
 
-These back the cockpit's Monitor panel (the persistent `lab-monitor` agent).
+These back the dashboard's Monitor panel (the persistent `lab-monitor` agent).
 
 ### `monitor_loop.sh`
 Persistent, read-only watchdog. Every `INTERVAL` seconds it runs the MiniMax

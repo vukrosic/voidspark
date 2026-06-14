@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-// MiniMax Token Plan quota, read so the cockpit can show when MiniMax is out of
+// MiniMax Token Plan quota, read so the dashboard can show when MiniMax is out of
 // tokens (and is therefore falling back to Codex). The `general` model is the
 // text/coding model the agents use; `current_interval_*` is the 5-hour rolling
 // window (the one that 429s first), `current_weekly_*` is the weekly cap.
@@ -38,7 +38,7 @@ export async function GET() {
         'Content-Type': 'application/json',
       },
       cache: 'no-store',
-      // Don't let a slow MiniMax API stall the cockpit poll.
+      // Don't let a slow MiniMax API stall the dashboard poll.
       signal: AbortSignal.timeout(10_000),
     });
 

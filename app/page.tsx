@@ -299,7 +299,7 @@ export default function LaunchCodexPage() {
   // False until the registry fetch resolves, so we don't flash the onboarding
   // card before we know whether any project exists.
   const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
-  // No project registered yet (fresh clone) — the cockpit shows the onboarding
+  // No project registered yet (fresh clone) — the dashboard shows the onboarding
   // card instead of the ideas/queue sections until the user adds a repo.
   const hasProject = projects.length > 0;
   const [projectSwitching, setProjectSwitching] = useState<boolean>(false);
@@ -737,6 +737,23 @@ export default function LaunchCodexPage() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
+
+  // Whether this machine has a working MiniMax subscription. `minimaxUsage` is
+  // null until the first poll returns, so we only treat MiniMax as *absent* once
+  // we have a definitive { ok:false } answer — that keeps subscribers from
+  // briefly losing the MiniMax option on load.
+  const hasMinimax = minimaxUsage?.ok === true;
+  const minimaxKnownAbsent = minimaxUsage != null && minimaxUsage.ok === false;
+  // Runner choices offered in Settings — MiniMax only when it's actually usable.
+  const agentOptions = hasMinimax
+    ? AGENT_OPTIONS
+    : AGENT_OPTIONS.filter((o) => o.id !== "minimax");
+
+  // No MiniMax subscription → drop it as a runner choice and switch the active
+  // agent off it (the default) so the user never picks an agent they can't run.
+  useEffect(() => {
+    if (minimaxKnownAbsent && agent === "minimax") setAgent("codex");
+  }, [minimaxKnownAbsent, agent]);
 
   // Close the settings popover on any click/tap outside it (and on Escape).
   useEffect(() => {
@@ -2266,7 +2283,7 @@ export default function LaunchCodexPage() {
         <DocumentationView onHome={() => setView("home")} />
       ) : (
       <main className="min-h-screen flex-1 bg-[#1f1e1d] text-[#faf9f6]">
-        {/* System health bar — sticky at the top of the cockpit. At-a-glance
+        {/* System health bar — sticky at the top of the dashboard. At-a-glance
             loop status (workers, dead panes, idea pool, throughput, GPU, quota)
             plus the master Autoresearch toggle. Read-only poll; the toggle is
             the page's own handler so state stays single-sourced. */}
@@ -2294,7 +2311,7 @@ export default function LaunchCodexPage() {
               <Settings2 className="h-3.5 w-3.5" aria-hidden />
               <span className="hidden sm:inline">Settings</span>
               <span className="h-1 w-1 rounded-full bg-[#faf9f6]/30" aria-hidden />
-              <span>{AGENT_OPTIONS.find((o) => o.id === agent)?.label ?? agent}</span>
+              <span>{agentOptions.find((o) => o.id === agent)?.label ?? agent}</span>
             </button>
 
             {settingsOpen && (
@@ -2308,7 +2325,7 @@ export default function LaunchCodexPage() {
                   onChange={(e) => setAgent(e.target.value)}
                   className="mt-1.5 w-full rounded-lg border border-cyan-300/30 bg-[#1f1e1d] px-3 py-2 text-sm font-semibold tracking-[0.04em] text-cyan-200 transition hover:border-cyan-300/60 focus:outline-none focus:ring-2 focus:ring-cyan-300/40"
                 >
-                  {AGENT_OPTIONS.map((opt) => (
+                  {agentOptions.map((opt) => (
                     <option key={opt.id} value={opt.id} className="bg-[#1f1e1d] text-cyan-100">
                       {opt.label}
                     </option>
@@ -2338,14 +2355,26 @@ export default function LaunchCodexPage() {
                   into <span className="font-mono">remote-box.json</span>.
                 </p>
                 <div className="mt-2 flex gap-1.5">
+                  {/* This is an SSH command, not a credential — but it looks
+                      secret enough that browsers offer to "save password" on a
+                      real type=password field. Keep it type=text (so Chrome /
+                      Firefox / 1Password leave it alone) and mask via CSS when
+                      hidden. The data-*-ignore attrs deter the popular managers. */}
                   <input
-                    type={boxShow ? "text" : "password"}
+                    type="text"
                     value={boxSsh}
                     onChange={(e) => setBoxSsh(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") handleSaveBox(); }}
                     placeholder="ssh -p 52674 root@1.2.3.4"
                     spellCheck={false}
                     autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    name="vast-ssh-command"
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
+                    style={!boxShow ? ({ WebkitTextSecurity: "disc" } as React.CSSProperties) : undefined}
                     className="h-8 flex-1 rounded-md border border-white/12 bg-[#1f1e1d] px-2.5 font-mono text-[11px] text-[#faf9f6]/85 focus:border-white/30 focus:outline-none"
                   />
                   <button
@@ -3491,7 +3520,7 @@ export default function LaunchCodexPage() {
       </main>
       )}
       {/* Watchdog agent dock — floating opener + right panel, fixed-positioned
-          so it rides above the cockpit regardless of the active view. */}
+          so it rides above the dashboard regardless of the active view. */}
       <MonitorPanel />
     </div>
   );

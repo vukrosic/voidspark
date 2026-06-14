@@ -9,7 +9,7 @@ import { getAutorunAgent } from '@/lib/autorun';
 import { getAutoImplementAgent } from '@/lib/autoimplement';
 
 // ---- System health snapshot -------------------------------------------------
-// One read-only GET that gathers every "is the loop alive?" signal the cockpit
+// One read-only GET that gathers every "is the loop alive?" signal the dashboard
 // health bar shows, in a single cheap local pass. It MUST NOT mutate anything:
 // polling it every few seconds must never tick the pipeline (only /api/orchestrate
 // fans out workers). Sources, all on disk / from tmux:

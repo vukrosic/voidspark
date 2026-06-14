@@ -9,7 +9,7 @@ API keys and your hardware. Nothing leaves your box.
 
 > Status: early extraction (M0). You point it at one local research repo today;
 > the generic adapter layer that will let it drive *any* repo with one config
-> file is in progress. See [PLAN.md](PLAN.md).
+> file is in progress — see [Roadmap](#roadmap).
 
 ## First run
 
@@ -19,7 +19,7 @@ cp .env.local.example .env.local   # optional — see Environment below
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). On a fresh clone the cockpit
+Open [http://localhost:3000](http://localhost:3000). On a fresh clone the dashboard
 shows an **onboarding card** — add the absolute path to the research repo you
 want VoidSpark to drive. Don't have one? Clone the reference target
 [universe-lm](https://github.com/vukrosic/universe-lm) and point VoidSpark at it.
@@ -48,6 +48,7 @@ VOIDSPARK_TARGET_REPO=         # abs path to the repo to drive (seeds the regist
 ANTHROPIC_API_KEY=             # for whichever agent CLI you run
 AGENT_LAUNCHER=                # optional: override the vendored scripts/launch_agent.sh
 CODEX_MODEL=                   # optional: default gpt-5.4-mini
+MINIMAX_API_KEY=               # optional: enables MiniMax as a runner + its quota readout
 NEXT_PUBLIC_GPU_SERVER_URL=    # optional: GPU status endpoint
 CONVEX_DEPLOYMENT=             # optional
 NEXT_PUBLIC_CONVEX_URL=        # optional
@@ -75,5 +76,46 @@ Each stage is an agent reading a prompt; `flip.sh` advances the status; the
 dashboard reads the queue live. There is no code-review gate — the implementer
 owns correctness, and a crashed run bounces back to it.
 
-See [PLAN.md](PLAN.md) for the architecture and the adapter contracts that will
-make this work on any codebase.
+## The engine vs. your repo
+
+Two separate things — keeping this seam clean is the whole design:
+
+| | VoidSpark (the engine) | The research repo (the target) |
+|---|---|---|
+| What | dashboard + queue + pipeline + agent prompts + state machine | the actual model/training code the experiments mutate |
+| Generic? | yes — knows nothing about transformers | no — this is *your* codebase |
+| Example | this repo | [universe-lm](https://github.com/vukrosic/universe-lm) |
+| Ships in VoidSpark? | yes, the core | no — you bring your own, or clone the example |
+
+The engine reads and writes one source of truth: the `status` / `round` /
+`updated` frontmatter in the target repo's idea folders. Everything else hangs
+off that.
+
+## Philosophy
+
+**Localhost-only is the feature, not a limitation.** Your keys, your GPU, your
+data — nothing leaves your box. That's the whole trust story: you can point this
+at unpublished research and never wonder where it went.
+
+## Roadmap
+
+- **M0 — Standalone repo (now).** Clone & run on localhost against one local
+  research repo. De-hardcoded paths, in-app onboarding + GPU-box setup.
+- **M1 — Adapter seam.** Three small interfaces so the engine knows nothing about
+  any specific codebase:
+  - **RepoAdapter** — turn an idea into runnable code (file layout, the flag
+    convention, a cheap build/smoke check).
+  - **ComputeAdapter** — where a run happens (`local`, or `ssh` to your
+    Vast/remote box — generalizes today's `remote-box.json`).
+  - **Scorer** — parse the metric from a run and return WIN / NULL / FAIL against
+    a variance band.
+- **M2 — `voidspark.config.ts` + `init` CLI.** A second target repo proves the
+  adapter works on something that isn't the example.
+- **M3 — Public launch.** Docs + a short "watch it run" demo.
+
+Distribution is repo-first (clone & fork); an `npx voidspark init` CLI and an npm
+package come later, once the adapter API stops moving.
+
+## License
+
+[MIT](LICENSE) — maximally permissive. Fork it, ship it, build on it.

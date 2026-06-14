@@ -9,7 +9,7 @@ import { getActiveRepoDir } from '@/lib/projects';
 // A persistent MiniMax agent (tmux session `lab-monitor`, driven by
 // scripts/monitor_loop.sh) that every ~minute observes the whole research loop
 // and writes a fresh status summary to autoresearch/monitor-summary.md. This
-// route is the cockpit Monitor panel's control surface:
+// route is the dashboard Monitor panel's control surface:
 //   action: "status" (default)  -> { alive, summary, summaryAgeMs, prompt, interval }
 //   action: "start"             -> ensure the prompt file exists, launch the loop
 //   action: "stop"              -> kill the tmux session
@@ -144,7 +144,7 @@ ${await readIssues()}
 ---
 This is a LIVE INTERACTIVE session, not a one-shot. Do this now: run the read-only checks and give me your first status summary. Then STAY in your prompt — I will chat with you and ask follow-up questions, and a periodic "Auto-refresh" message will ask you to regenerate the summary. On every summary, re-run the checks fresh (curl -s http://localhost:3000/api/health/, curl -s -X POST http://localhost:3000/api/gpu-usage/, tmux ls, capture-pane on suspect sessions).
 
-You only OBSERVE the research system — never modify ideas, code, configs, or flags. The ONLY file you may write is the dashboard mirror: each time you produce a status summary, also write that summary verbatim (the markdown only) to autoresearch/monitor-summary.md, overwriting it, so the cockpit's "Last summary" view stays current.`;
+You only OBSERVE the research system — never modify ideas, code, configs, or flags. The ONLY file you may write is the dashboard mirror: each time you produce a status summary, also write that summary verbatim (the markdown only) to autoresearch/monitor-summary.md, overwriting it, so the dashboard's "Last summary" view stays current.`;
 }
 
 // Launch the watchdog as an INTERACTIVE cmf agent (its REPL stays open so the
