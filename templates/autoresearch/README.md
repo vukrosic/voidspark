@@ -4,23 +4,25 @@
 cockpit) and your repo (the target it drives). VoidSpark reads and writes *only*
 this folder — your model code is untouched.
 
-> 🟡 **This is a starter, not a finished pipeline.** The directory structure and
-> the generic machinery (`bin/flip.sh`) work as-is, but the **prompts in
-> `prompts/` contain `<...>` / `TODO` placeholders you must adapt to your repo**
-> (your model files, config-flag convention, run command, and GPU/compute setup).
-> Until you do, the AI agents VoidSpark launches won't know how to build or run
-> your experiments. The reference implementation to copy from is
+> 🟡 **This is a starter, not a finished pipeline.** The directory structure, the
+> generic machinery (`bin/flip.sh`), and the prompts all work as-is — but they
+> read your repo's specifics from **one file: [`config.json`](config.json)**.
+> Fill that in (repo path, run command, config-flag convention, fixed test,
+> metric, compute) and the prompts pick it up automatically; until you do, the AI
+> agents VoidSpark launches won't know how to build or run your experiments. The
+> reference implementation to copy from is
 > [universe-lm](https://github.com/vukrosic/universe-lm).
 
 ## What's here
 
 ```
 autoresearch/
+├── config.json         # ← THE ONE FILE TO EDIT (repo path, run cmd, fixed test…)
 ├── ideas/
 │   └── NNN-<slug>/
 │       ├── idea.md     # the idea + `status` frontmatter (source of truth)
 │       └── log.jsonl   # one line per status flip (powers Analytics)
-├── prompts/            # one prompt per pipeline stage — ADAPT THESE
+├── prompts/            # one prompt per pipeline stage — read config.json, generic
 │   ├── generate-ideas.md
 │   ├── implement-idea.md
 │   ├── run-idea.md
@@ -39,10 +41,12 @@ autoresearch/
 
 ## Next steps
 
-1. Open each file in `prompts/` and replace every `<...>` / `TODO` with your
-   repo's specifics (paths, model/config files, flag convention, run command).
+1. **Edit `config.json`** — replace every `<...>` value with your repo's
+   specifics (repo path, run command, config-flag convention, fixed test, metric,
+   scorer). This is the only file you have to fill in; the prompts read from it.
 2. In VoidSpark, open **Settings → GPU box** and paste your Vast.ai SSH command
-   (this writes `autoresearch/remote-box.json`).
+   (this writes `autoresearch/remote-box.json`, which `config.json`'s `compute`
+   field points at).
 3. Add your first real idea (or let "Generate ideas" mine some), then implement
    and run it from the dashboard.
 

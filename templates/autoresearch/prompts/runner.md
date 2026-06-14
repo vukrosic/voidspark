@@ -1,9 +1,9 @@
 # Runner prompt (run on GPU + pull + analyze — the autonomous batch version)
 
-> 🟡 **STARTER TEMPLATE — adapt this to your repo.** This is the batch runner that
-> drains the whole `needs-run` queue unattended. The compute/box mechanics are a
-> sketch — rewrite the `<...>` bits for your hardware and run command. The
-> reference implementation is
+> 🟢 **One file to fill in.** This is the batch runner that drains the whole
+> `needs-run` queue unattended. It's generic — your `compute` hookup and
+> `run_command` come from `autoresearch/config.json`. Edit that file, not this
+> one. The reference implementation is
 > [universe-lm](https://github.com/vukrosic/universe-lm)'s `autoresearch/`.
 
 The **last mile**. Claims `needs-run` ideas, runs the A/B on the GPU, pulls the
@@ -40,9 +40,10 @@ finalize what's done.
 
 ## 0. Connection
 
-<TODO: how to reach your GPU and multiplex one ssh connection. Read
-`autoresearch/remote-box.json` (written from VoidSpark Settings). If no box is
-reachable, print `NO BOX: <why>` and stop — do not flip any status.>
+Read `autoresearch/config.json` → `compute` (by default it points at
+`autoresearch/remote-box.json`, written from VoidSpark Settings). Multiplex one
+ssh connection and route every command through it. If no box is reachable, print
+`NO BOX: <why>` and stop — do not flip any status.
 
 ## 1. Claim the queue (batch, not one-at-a-time)
 
@@ -60,9 +61,9 @@ Never hand-edit frontmatter — `flip.sh` does the status change and the
 Generate **one queue script**: every claimed treatment back-to-back (plus N≥3
 controls only when you need a fresh baseline). Each job is **guarded** so a
 failure logs and the queue continues (do **not** use `set -e`). Push it to the
-box and launch in a **detached** tmux session so it survives disconnect.
-<TODO: your exact run command per job + a JOB_TIMEOUT cap so one job can't hog the
-box.>
+box and launch in a **detached** tmux session so it survives disconnect. Each job
+uses the `run_command` from `config.json`; add a `JOB_TIMEOUT` cap so one job
+can't hog the box.
 
 ## 3. Poll (every re-invocation — the cron-safe path)
 

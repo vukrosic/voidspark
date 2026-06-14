@@ -1,9 +1,10 @@
 # Implement-idea prompt (one idea → working experiment code)
 
-> 🟡 **STARTER TEMPLATE — adapt this to your repo.** The bracketed `<...>` bits
-> (repo path, file names, config flag convention, the fixed test) are
-> placeholders. Rewrite them for your codebase. Keep the `{{IDEA_SLUG}}` and
-> `{{DONE_URL}}` tokens exactly — VoidSpark substitutes them at launch.
+> 🟢 **One file to fill in.** This prompt is generic — repo path, file names,
+> the config-flag convention, and the fixed test all come from
+> `autoresearch/config.json`. Edit that file, not this one. Keep the
+> `{{IDEA_SLUG}}` and `{{DONE_URL}}` tokens exactly — VoidSpark substitutes them
+> at launch.
 
 Take **one specific idea** and turn it into ready-to-run experiment code in this
 repo. The idea to implement is:
@@ -17,11 +18,11 @@ repo. The idea to implement is:
 > the code down. Never end by asking "should I continue?" — just do it, then stop.
 
 > ## 🔴 THE FIXED TEST — never change it
-> <TODO: your repo's fixed test. Example: "Runs at one small scale, one seed. The
-> change must be < 200 LoC behind a config flag, off by default, and
-> byte-identical to the baseline at step 0 (zero/identity init).">
+> Defined in `autoresearch/config.json`: runs at `tier` (one fixed scale, `seed`).
+> The change must fit within `loc_budget` behind the `config_flag`, **off by
+> default**, and satisfy `init_constraint` (step 0 byte-identical to the baseline).
 
-**Repo:** `<TODO: absolute path to your research repo>`
+**Repo:** the `repo_path` in `autoresearch/config.json`.
 
 Before you start: `git status` and `git diff` (another agent may be editing the
 same files). Never rebase, never push.
@@ -40,17 +41,18 @@ design sketch, and the bet are already written. Follow the design sketch.
 Append a `## Plan` section to the **bottom of
 `autoresearch/ideas/{{IDEA_SLUG}}/idea.md`** (do NOT create a separate plan.md, and
 do NOT touch the frontmatter). State: the exact files/functions you'll change
-(e.g. `<your model file>`, `<your config file>`), the config flag name
-(`use_<feature>`), how it stays zero-init at step 0, the run command, and how the
-final metric is read. Keep it tight.
+(see `model_files` in `autoresearch/config.json`), the flag name (per the
+`config_flag` convention), how it satisfies `init_constraint` at step 0, the
+`run_command`, and how the `metric` is read. Keep it tight.
 
 ## Step 3 — Implement
 
-Make the change behind the `use_<feature>` flag, **off by default** so the
-baseline path is untouched. Keep it minimal and < 200 LoC. Then confirm:
+Make the change behind the flag (`config_flag` convention), **off by default** so
+the baseline path is untouched. Keep it minimal and within `loc_budget`. Then
+confirm:
 - it imports cleanly,
 - the flag toggles the behavior,
-- with the flag **off**, step-0 output matches the baseline.
+- with the flag **off**, step-0 output matches the baseline (`init_constraint`).
 
 Follow the run convention in `prompts/runner.md` so the experiment is ready to
 launch (you don't have to run full training here — just make it runnable and note

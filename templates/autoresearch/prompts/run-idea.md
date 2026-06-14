@@ -1,9 +1,10 @@
 # Run-idea prompt (one idea → A/B on the GPU → verdict)
 
-> 🟡 **STARTER TEMPLATE — adapt this to your repo.** The box mechanics below are a
-> sketch; rewrite the `<...>` bits for your compute (local GPU, Vast.ai, etc.) and
-> your run command. Keep the `{{IDEA_SLUG}}` and `{{DONE_URL}}` tokens exactly —
-> VoidSpark substitutes them at launch.
+> 🟢 **One file to fill in.** This prompt is generic — your `compute` hookup,
+> `run_command`, `metric`, and `results_schema` all come from
+> `autoresearch/config.json`. Edit that file, not this one. Keep the
+> `{{IDEA_SLUG}}` and `{{DONE_URL}}` tokens exactly — VoidSpark substitutes them
+> at launch.
 
 Run **one specific idea's** A/B, bring back the numbers, judge it, and close the
 loop. The idea to run is:
@@ -23,10 +24,11 @@ just this idea.
 
 ## The compute
 
-<TODO: how to reach your GPU. Example: read `autoresearch/remote-box.json` for the
-SSH connection (`ssh`, `remote_repo`, `remote_venv`); multiplex one ssh
-connection and route every command through it; set the venv on PATH.> The
-connection box config is written from VoidSpark **Settings → GPU box**.
+Read `autoresearch/config.json` → `compute`. By default it points at
+`autoresearch/remote-box.json` (SSH connection: `ssh`, `remote_repo`,
+`remote_venv`) — multiplex one ssh connection, route every command through it,
+and put the venv on PATH. That box config is written from VoidSpark
+**Settings → GPU box**.
 
 ## Steps
 
@@ -36,11 +38,12 @@ connection box config is written from VoidSpark **Settings → GPU box**.
 2. Read `idea.md` (the `## Plan` section has the config flag, run command, and the
    pass/fail bar). Sync code to the box.
 3. **Run the A/B** for this one idea (control = flag off, treatment = flag on,
-   same seed). <TODO: your exact run command + how the final metric is read.>
-4. **Pull + record** logs and a `results.json` under
-   `remote-results/<date>-<tier>/` (pick a stable schema and reuse it). Write
-   `evidence.md` in the idea folder: treatment metric, `Δ vs baseline`, the
-   verdict vs the bar (WIN / NULL / FAIL), and the baseline line.
+   same `seed`). Use the `run_command` from `config.json` and read the `metric`
+   it names.
+4. **Pull + record** logs and a `results.json` at the `results_schema` path from
+   `config.json` (reuse that schema every run). Write `evidence.md` in the idea
+   folder: treatment `metric`, `Δ vs baseline`, the verdict vs the `scorer` bar
+   (WIN / NULL / FAIL), and the baseline line.
 5. **Close the loop:**
    - finished and judged → `flip.sh {{IDEA_SLUG}} done run-button "Δ=<x>; <WIN|NULL>"`
    - run crashed (OOM/NaN/bad flag) → **do not write a null** →

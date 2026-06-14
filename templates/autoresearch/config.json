@@ -1,0 +1,14 @@
+{
+  "repo_path": "<absolute path to your research repo, e.g. /Users/you/my-model>",
+  "run_command": "<how ONE experiment launches, e.g. 'python train.py --config {flag}'>",
+  "config_flag": "use_<feature> — off by default; zero/identity init so step 0 is byte-identical to the baseline",
+  "tier": "<your ONE fixed small scale, e.g. '1M params / 3M tokens, one seed'>",
+  "seed": 42,
+  "metric": "<the number you score on, e.g. 'val_loss (lower is better)'>",
+  "scorer": "<the pass/fail bar, e.g. 'treatment beats baseline by more than the noise band'>",
+  "loc_budget": 200,
+  "init_constraint": "<step-0 equivalence rule, e.g. 'zero/identity init — step 0 output byte-identical to baseline'>",
+  "model_files": ["<your model file, e.g. model.py>", "<your config file, e.g. config.py>"],
+  "results_schema": "remote-results/<date>-<tier>/results.json",
+  "compute": "read autoresearch/remote-box.json (written from VoidSpark → Settings → GPU box)"
+}

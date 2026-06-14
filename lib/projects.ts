@@ -190,8 +190,9 @@ export async function addProject(
 // ---- Scaffold autoresearch/ ------------------------------------------------
 // Copies VoidSpark's starter template (templates/autoresearch/) into a repo that
 // has none, so the dashboard has something to drive. The template is a STARTER:
-// flip.sh + the directory contract work as-is, but the prompts carry TODO
-// placeholders the user adapts to their codebase (see the template README).
+// flip.sh + the directory contract work as-is, and the prompts are generic — the
+// user only fills in autoresearch/config.json, which the prompts read from (see
+// the template README).
 //
 // Deliberately refuses to overwrite an existing autoresearch/ — we never clobber
 // a user's pipeline. Automation flags are NOT in the template (their presence

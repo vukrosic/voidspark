@@ -1244,7 +1244,7 @@ export default function LaunchCodexPage() {
         setScaffoldMsg(`✗ ${data?.error ?? "Couldn't scaffold autoresearch/."}`);
         return;
       }
-      setScaffoldMsg("✓ Created autoresearch/ — generate ideas to start the loop.");
+      setScaffoldMsg("✓ Created autoresearch/ — now fill in autoresearch/config.json, then generate ideas.");
       setScaffoldRepo(null);
       refreshIdeas();
     } catch {
