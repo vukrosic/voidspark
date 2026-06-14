@@ -11,7 +11,7 @@ Copy `.env.local.example` and fill in what you need. All keys are optional.
 | Variable | Purpose |
 |---|---|
 | `VOIDSPARK_TARGET_REPO` | Absolute path to the repo to drive. Seeds the project registry on first run. |
-| `ANTHROPIC_API_KEY` | For whichever agent CLI you run (e.g. Claude). |
+| *(your agent's key)* | VoidSpark needs none. If your agent CLI reads a key from the env (e.g. Claude → `ANTHROPIC_API_KEY`), set it here and it's passed through. |
 | `MINIMAX_API_KEY` | Enables MiniMax as a runner and its quota readout. Without it, MiniMax UI is hidden. |
 | `AGENT_LAUNCHER` | Override the vendored `scripts/launch_agent.sh`. |
 | `AGENT_FALLBACK_SCRIPT` | Override the vendored `scripts/agent_with_fallback.sh`. |

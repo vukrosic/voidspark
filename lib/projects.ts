@@ -1,4 +1,4 @@
-import { readFile, writeFile, unlink } from 'fs/promises';
+import { readFile, writeFile, unlink, cp, chmod } from 'fs/promises';
 import { readFileSync, existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { RESEARCH_REPO_DIR } from './codexLauncher';
@@ -121,10 +121,30 @@ export type AddProjectError =
   | 'path-not-found'
   | 'path-not-directory';
 
+// Non-blocking signal handed back to the UI when an added repo looks like it
+// won't show anything. VoidSpark drives ONLY the `autoresearch/` folder; a repo
+// without one renders an empty dashboard (the "my data vanished" footgun — the
+// user usually pointed at the wrong folder). We warn instead of rejecting,
+// because some users legitimately add a repo before scaffolding it — and the UI
+// offers to scaffold it (see scaffoldAutoresearch).
+export type AddProjectWarning = 'no-autoresearch';
+
+// True when <repoPath>/autoresearch exists and is a directory.
+function hasAutoresearchDir(repoPath: string): boolean {
+  try {
+    return statSync(join(repoPath, 'autoresearch')).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export async function addProject(
   rawName: unknown,
   rawPath: unknown
-): Promise<{ ok: true; project: Project; projects: Project[] } | { ok: false; error: AddProjectError }> {
+): Promise<
+  | { ok: true; project: Project; projects: Project[]; warning?: AddProjectWarning }
+  | { ok: false; error: AddProjectError }
+> {
   const name = typeof rawName === 'string' ? rawName.trim() : '';
   const repoPath = typeof rawPath === 'string' ? rawPath.trim() : '';
   if (!name) return { ok: false, error: 'invalid-name' };
@@ -138,13 +158,19 @@ export async function addProject(
   }
   if (!stat.isDirectory()) return { ok: false, error: 'path-not-directory' };
 
+  // Soft check (after the hard directory validation, before persisting): the
+  // repo is valid but has no autoresearch/, so flag it for the UI.
+  const warning: AddProjectWarning | undefined = hasAutoresearchDir(repoPath)
+    ? undefined
+    : 'no-autoresearch';
+
   const projects = readRegistrySync();
 
   // If this exact path is already registered, treat it as a no-op success so
   // the UI just re-selects the existing entry instead of erroring.
   const dup = projects.find((p) => p.repoPath === repoPath);
   if (dup) {
-    return { ok: true, project: dup, projects };
+    return { ok: true, project: dup, projects, warning };
   }
 
   // Build a unique id from the name. Suffix `-2`, `-3`, ... on collision.
@@ -158,7 +184,58 @@ export async function addProject(
   const project: Project = { id, name, repoPath };
   const next = [...projects, project];
   await writeFile(REGISTRY_PATH, JSON.stringify({ projects: next }, null, 2) + '\n', 'utf8');
-  return { ok: true, project, projects: next };
+  return { ok: true, project, projects: next, warning };
+}
+
+// ---- Scaffold autoresearch/ ------------------------------------------------
+// Copies VoidSpark's starter template (templates/autoresearch/) into a repo that
+// has none, so the dashboard has something to drive. The template is a STARTER:
+// flip.sh + the directory contract work as-is, but the prompts carry TODO
+// placeholders the user adapts to their codebase (see the template README).
+//
+// Deliberately refuses to overwrite an existing autoresearch/ — we never clobber
+// a user's pipeline. Automation flags are NOT in the template (their presence
+// means ON), so a freshly scaffolded repo never auto-starts anything.
+
+export type ScaffoldError =
+  | 'invalid-path'
+  | 'path-not-found'
+  | 'path-not-directory'
+  | 'autoresearch-exists'
+  | 'template-missing'
+  | 'copy-failed';
+
+export async function scaffoldAutoresearch(
+  rawPath: unknown
+): Promise<{ ok: true; created: string } | { ok: false; error: ScaffoldError }> {
+  const repoPath = typeof rawPath === 'string' ? rawPath.trim() : '';
+  if (!repoPath) return { ok: false, error: 'invalid-path' };
+
+  let stat;
+  try {
+    stat = statSync(repoPath);
+  } catch {
+    return { ok: false, error: 'path-not-found' };
+  }
+  if (!stat.isDirectory()) return { ok: false, error: 'path-not-directory' };
+
+  const dest = join(repoPath, 'autoresearch');
+  if (existsSync(dest)) return { ok: false, error: 'autoresearch-exists' };
+
+  const template = join(process.cwd(), 'templates', 'autoresearch');
+  if (!existsSync(template)) return { ok: false, error: 'template-missing' };
+
+  try {
+    await cp(template, dest, { recursive: true });
+    // cp preserves mode, but be explicit so flip.sh is runnable regardless of
+    // how the template shipped (e.g. checked out without the exec bit).
+    await chmod(join(dest, 'bin', 'flip.sh'), 0o755).catch(() => {
+      /* non-fatal — the user can chmod it themselves */
+    });
+  } catch {
+    return { ok: false, error: 'copy-failed' };
+  }
+  return { ok: true, created: dest };
 }
 
 // ---- Remove a project ------------------------------------------------------

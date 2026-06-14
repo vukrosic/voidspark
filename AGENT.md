@@ -27,10 +27,10 @@ Verify each; install or tell the user how if missing:
 - **tmux** — `tmux -V`. Agents run in detached tmux sessions; it is required.
   (`brew install tmux` on macOS, `apt install tmux` on Linux.)
 - **git** — `git --version`.
-- **A coding-agent CLI on PATH** — at least one of `claude`, `codex`, or
-  `claude-minimax-free` (`which claude codex claude-minimax-free`). This is the
-  runner that does the actual implementing. If none exist, tell the user they
-  need to install one (e.g. Claude Code) before the loop can run.
+- **A coding-agent CLI on PATH** — e.g. `claude` or `codex`
+  (`which claude codex`). This is the runner that does the actual implementing,
+  and it must be **authenticated** (its own login or key). If none exist, tell
+  the user to install and log into one before the loop can run.
 
 ## 2. Install dependencies
 
@@ -46,15 +46,17 @@ Create `.env.local` from the example if it doesn't exist:
 cp -n .env.local.example .env.local
 ```
 
-Everything in it is optional, but the agent CLI needs a key. **Ask the user** for:
+Everything in it is optional. VoidSpark itself needs no key — but the **agent
+CLI** must be authenticated (its own login, or a key in the shell environment).
+If the agent reads a key from the env, the user can put it in `.env.local` and
+VoidSpark passes it through.
 
-- `ANTHROPIC_API_KEY` — required by the Claude agent CLI. Write it into
-  `.env.local`.
-- `MINIMAX_API_KEY` *(optional)* — enables MiniMax as a cheaper runner. If the
-  user doesn't have one, skip it; the MiniMax UI stays hidden and Codex is used.
+- `MINIMAX_API_KEY` *(optional)* — enables MiniMax as a runner + its quota
+  readout. If the user doesn't have one, skip it; the MiniMax UI stays hidden and
+  the agent falls back to Codex.
 
-Do not invent keys. If the user can't provide one now, continue — they can add it
-later and restart.
+Do not invent keys. If the agent isn't logged in, point the user at its CLI's
+login flow; they can finish setup and restart.
 
 ## 4. Get a target research repo
 

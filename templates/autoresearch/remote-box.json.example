@@ -1,0 +1,12 @@
+{
+  "provider": "vast",
+  "ssh": "ssh -p <PORT> root@<HOST>",
+  "host": "<HOST>",
+  "port": 0,
+  "user": "root",
+  "remote_repo": "/root/<your-repo>",
+  "remote_venv": "/venv/main",
+  "hardware": "<e.g. RTX 3090, CUDA 12.x, PyTorch 2.x>",
+  "notes": "Don't edit this file by hand — paste your SSH command in VoidSpark Settings → GPU box and it writes remote-box.json for you. This .example just shows the shape.",
+  "updated": "<YYYY-MM-DD>"
+}

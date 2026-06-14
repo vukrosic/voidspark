@@ -9,9 +9,9 @@ are all welcome.
 - **tmux** — agents run in detached tmux sessions (`brew install tmux` /
   `apt install tmux`)
 - **git**
-- A **coding-agent CLI** on `PATH` for running the loop locally: one of `claude`,
-  `codex`, or `claude-minimax-free`
-- An **`ANTHROPIC_API_KEY`** (or whichever agent CLI you use) in `.env.local`
+- A **coding-agent CLI** on `PATH` for running the loop locally (e.g. `claude` or
+  `codex`), already **authenticated** (its own login or key — VoidSpark doesn't
+  read it)
 - *Optional:* a **target research repo** with an `autoresearch/` folder to drive
   (clone [universe-lm](https://github.com/vukrosic/universe-lm) if you don't have
   one), and a **GPU box** for the run stage

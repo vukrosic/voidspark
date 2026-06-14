@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Server,
   Settings2,
+  SlidersHorizontal,
   Sparkles,
   Terminal,
   X,
@@ -251,6 +252,24 @@ function sessionTagMeta(session: Session): {
 
 export default function LaunchCodexPage() {
   const [view, setView] = useState<View>("home");
+  // Simple vs Advanced UI. Simple hides the manual power-user controls (idea
+  // generation form, prompt editor, raw tmux session lists) — when Autoresearch
+  // drives the loop you don't need them. Persisted to localStorage; defaults to
+  // simple so a fresh/public user gets the focused view. Loaded in an effect to
+  // avoid an SSR/hydration mismatch.
+  const [uiMode, setUiMode] = useState<"simple" | "advanced">("simple");
+  const advanced = uiMode === "advanced";
+  useEffect(() => {
+    const saved = typeof window !== "undefined" && localStorage.getItem("voidspark-ui-mode");
+    if (saved === "advanced" || saved === "simple") setUiMode(saved);
+  }, []);
+  const toggleUiMode = useCallback(() => {
+    setUiMode((m) => {
+      const next = m === "simple" ? "advanced" : "simple";
+      try { localStorage.setItem("voidspark-ui-mode", next); } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
   const [agent, setAgent] = useState<string>("minimax");
   // Headless = run the agent non-interactively so it exits (and the tmux pane
   // self-closes) when the task finishes. On by default; uncheck to keep the
@@ -311,6 +330,12 @@ export default function LaunchCodexPage() {
   const [addRepoBusy, setAddRepoBusy] = useState<boolean>(false);
   const [addRepoPicking, setAddRepoPicking] = useState<boolean>(false);
   const [addRepoError, setAddRepoError] = useState<string>("");
+  // Set after adding a repo that has no autoresearch/ folder — the dashboard
+  // will be empty (VoidSpark drives only that folder), so we surface a banner
+  // offering to scaffold a starter. Holds the repoPath to scaffold.
+  const [scaffoldRepo, setScaffoldRepo] = useState<string | null>(null);
+  const [scaffoldBusy, setScaffoldBusy] = useState<boolean>(false);
+  const [scaffoldMsg, setScaffoldMsg] = useState<string>("");
   // Disconnect (remove) flow. `confirmRemoveId` is set when the user has
   // clicked × on a row and is being asked to confirm; clicking it again (or
   // Cancel) clears it. `removeRepoBusy` is the id currently in flight.
@@ -1175,6 +1200,13 @@ export default function LaunchCodexPage() {
         return;
       }
       if (Array.isArray(data.projects)) setProjects(data.projects);
+      // The repo was added but has no autoresearch/ folder — warn + offer to
+      // scaffold one, otherwise the dashboard looks empty (and the user thinks
+      // their data vanished).
+      if (data.warning === "no-autoresearch") {
+        setScaffoldRepo(addRepoPath.trim());
+        setScaffoldMsg("");
+      }
       // Auto-activate the new entry so the loop points at it immediately.
       // Fire-and-forget: the project list already shows a `projectSwitching`
       // spinner for the per-project API repulls, so closing the form here is
@@ -1192,6 +1224,33 @@ export default function LaunchCodexPage() {
       setAddRepoError("Network error — is the dev server running?");
     } finally {
       setAddRepoBusy(false);
+    }
+  };
+
+  // Copy the starter autoresearch/ template into the just-added repo so the loop
+  // has something to drive. Called from the no-autoresearch warning banner.
+  const handleScaffold = async () => {
+    if (!scaffoldRepo || scaffoldBusy) return;
+    setScaffoldBusy(true);
+    setScaffoldMsg("");
+    try {
+      const response = await fetch("/api/projects/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scaffold: { repoPath: scaffoldRepo } }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.success) {
+        setScaffoldMsg(`✗ ${data?.error ?? "Couldn't scaffold autoresearch/."}`);
+        return;
+      }
+      setScaffoldMsg("✓ Created autoresearch/ — generate ideas to start the loop.");
+      setScaffoldRepo(null);
+      refreshIdeas();
+    } catch {
+      setScaffoldMsg("✗ Network error while scaffolding.");
+    } finally {
+      setScaffoldBusy(false);
     }
   };
 
@@ -2293,9 +2352,61 @@ export default function LaunchCodexPage() {
           onToggle={handleToggleAutoresearch}
         />
         <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10 pt-6">
+        {/* No-autoresearch warning — the added repo has no autoresearch/ folder,
+            so the dashboard is empty. Offer to scaffold a starter rather than
+            leave the user thinking their data vanished. */}
+        {scaffoldRepo && (
+          <div className="mb-4 w-full max-w-2xl rounded-lg border border-amber-300/30 bg-amber-300/[0.07] px-4 py-3">
+            <p className="text-xs font-semibold text-amber-100">
+              This folder has no <span className="font-mono">autoresearch/</span> — nothing to drive yet.
+            </p>
+            <p className="mt-1 text-[11px] leading-snug text-[#faf9f6]/55">
+              VoidSpark only reads the <span className="font-mono">autoresearch/</span> folder. If you
+              expected experiments here, double-check the path. Or scaffold a starter to begin.
+            </p>
+            <p className="mt-1 break-all font-mono text-[10px] text-[#faf9f6]/35">{scaffoldRepo}</p>
+            <div className="mt-2.5 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleScaffold}
+                disabled={scaffoldBusy}
+                className="inline-flex h-7 items-center rounded-md border border-amber-300/50 bg-amber-300/15 px-2.5 text-[11px] font-medium text-amber-100 transition hover:bg-amber-300/25 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {scaffoldBusy ? "Creating…" : "Create starter autoresearch/"}
+              </button>
+              <button
+                type="button"
+                onClick={() => { setScaffoldRepo(null); setScaffoldMsg(""); }}
+                className="text-[11px] text-[#faf9f6]/45 transition hover:text-[#faf9f6]/75"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+        {scaffoldMsg && (
+          <p className={`mb-4 w-full max-w-2xl text-[11px] ${scaffoldMsg.startsWith("✓") ? "text-emerald-300/85" : "text-rose-300/90"}`}>
+            {scaffoldMsg}
+          </p>
+        )}
         {/* Uncommon controls (agent, headless, prompt files) live behind this
             gear so the main view stays focused on ideas + the queue. */}
-        <div className="flex w-full max-w-2xl justify-end">
+        <div className="flex w-full max-w-2xl items-center justify-end gap-2">
+          {/* Simple/Advanced UI toggle — Simple hides the manual power-user
+              controls so the loop's status takes center stage. */}
+          <button
+            type="button"
+            onClick={toggleUiMode}
+            title={
+              advanced
+                ? "Advanced UI — every manual control is shown. Click for the simple view."
+                : "Simple UI — manual controls hidden; let Autoresearch drive. Click for advanced."
+            }
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-white/12 bg-white/[0.03] px-2.5 text-xs font-medium text-[#faf9f6]/55 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20"
+          >
+            {advanced ? <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden /> : <Sparkles className="h-3.5 w-3.5" aria-hidden />}
+            <span className="hidden sm:inline">{advanced ? "Advanced" : "Simple"}</span>
+          </button>
           <div className="relative" ref={settingsRef}>
             <button
               type="button"
@@ -2426,6 +2537,7 @@ export default function LaunchCodexPage() {
                 ) : null}
               </div>
 
+              {advanced && (
               <div className="mt-4 border-t border-white/10 pt-3">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
                   Edit prompts
@@ -2454,6 +2566,7 @@ export default function LaunchCodexPage() {
                   ))}
                 </div>
               </div>
+              )}
 
               {/* MiniMax quota — only shown when the key is configured and the
                   API answered (ok). Percents are how much is LEFT to use. */}
@@ -2633,7 +2746,9 @@ export default function LaunchCodexPage() {
             </div>
           </div>
 
-          {/* Generate controls + prompt edit links */}
+          {/* Manual idea generation — hidden in Simple mode, where Autoresearch
+              refills the idea pool automatically. */}
+          {advanced && (
           <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <form onSubmit={handleGenerate} className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <div className="inline-flex h-9 items-center overflow-hidden rounded-md border border-white/10 bg-white/[0.03] text-xs text-[#faf9f6]/60">
@@ -2688,6 +2803,7 @@ export default function LaunchCodexPage() {
               <p className="text-xs text-amber-300/85 sm:text-right">{generateMessage}</p>
             )}
           </div>
+          )}
 
           {ideaActionMsg && (
             <p className="mb-2 text-xs text-amber-300">{ideaActionMsg}</p>
@@ -2753,7 +2869,8 @@ export default function LaunchCodexPage() {
             </div>
           )}
 
-	          {/* Idea-work tmux sessions (generate + implement) */}
+	          {/* Idea-work tmux sessions — advanced only (raw debugging surface). */}
+	          {advanced && (
 	          <div className="mt-6">
 	            <div className="mb-2 flex items-center gap-2 text-[11px] text-amber-200/55">
 	              <Terminal className="h-3.5 w-3.5" aria-hidden />
@@ -2762,6 +2879,7 @@ export default function LaunchCodexPage() {
 	            </div>
 	            {renderSessionList(ideaSessions, "No generate/implement sessions running.")}
 	          </div>
+	          )}
         </section>
 
         {/* ================= SECTION 2 · GPU RUNS ================= */}
@@ -3349,7 +3467,8 @@ export default function LaunchCodexPage() {
           )}
         </div>
 
-	          {/* Run-supervisor tmux sessions (lab-run-*) */}
+	          {/* Run-supervisor tmux sessions — advanced only (raw debugging surface). */}
+	          {advanced && (
 	          <div className="mt-6">
 	            <div className="mb-2 flex items-center gap-2 text-[11px] text-cyan-200/55">
 	              <Terminal className="h-3.5 w-3.5" aria-hidden />
@@ -3361,6 +3480,7 @@ export default function LaunchCodexPage() {
 	            </p>
 	            {renderSessionList(runSessions, "No run supervisors active.")}
 	          </div>
+	          )}
 	        </section>
 
 	        {/* ================= SECTION 3 · OTHER SESSIONS ================= */}

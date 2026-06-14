@@ -62,7 +62,9 @@ type GpuUsage = {
 // ms -> compact "4m" / "2h" / "3d" / "12s".
 function ago(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms)) return "—";
-  const s = Math.floor(ms / 1000);
+  // Clamp: a transient negative (clock skew / file rewritten mid-request) must
+  // never render as "-1s".
+  const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;

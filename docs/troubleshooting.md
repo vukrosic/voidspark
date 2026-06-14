@@ -12,8 +12,8 @@ directory — VoidSpark validates it before saving.
 
 - **`tmux` not found** — agents run in detached tmux sessions. Install tmux and
   make sure it's on `PATH`.
-- **No agent CLI** — one of `claude`, `codex`, or `claude-minimax-free` must be
-  on `PATH`. Check with `which codex` (or your runner).
+- **No agent CLI** — a coding-agent CLI (e.g. `claude` or `codex`) must be on
+  `PATH` and authenticated. Check with `which codex` (or your runner).
 - **Wrong launcher** — by default the vendored `scripts/launch_agent.sh` is used.
   Only set `AGENT_LAUNCHER` if you keep your own.
 - Watch a launch live: `tmux ls`, then `tmux attach -t <session>`.

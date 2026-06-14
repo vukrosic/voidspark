@@ -240,7 +240,10 @@ export async function GET() {
     // records.jsonl is append-only — its mtime is when the last record landed.
     try {
       const m = await stat(recordsPath());
-      if (recordCount > 0) lastRecordAgeMs = now - m.mtimeMs;
+      // Clamp at 0: `now` is captured at request start, but the loop can rewrite
+      // records.jsonl before this stat runs, making mtime a hair newer than now
+      // (which otherwise renders as a nonsensical "-1s ago").
+      if (recordCount > 0) lastRecordAgeMs = Math.max(0, now - m.mtimeMs);
     } catch {
       /* no file */
     }
@@ -257,7 +260,7 @@ export async function GET() {
     ideas: { inFlight, needsRun, total, done, rejected, running, floor: FLOOR, ceiling: CEILING },
     throughput: {
       flipsLastHour,
-      lastFlipMs: lastFlipTs ? now - lastFlipTs : null,
+      lastFlipMs: lastFlipTs ? Math.max(0, now - lastFlipTs) : null,
     },
     best,
     records: { count: recordCount, lastRecordAgeMs },
