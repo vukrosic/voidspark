@@ -22,10 +22,9 @@ const DOC_GROUPS: DocGroup[] = [
   },
   {
     heading: "Scripts",
-    blurb: "How to use the helper scripts shipped with this app.",
+    blurb: "The helper shell scripts shipped vendored with this app.",
     docs: [
-      { path: "scripts/README.md", title: "Scripts README", hint: "Sync + conversion tool docs" },
-      { path: "scripts/QUICKSTART.md", title: "Scripts Quickstart", hint: "Convert a paper's figures" },
+      { path: "scripts/README.md", title: "Scripts README", hint: "Agent launch + monitor watchdog scripts" },
     ],
   },
 ];

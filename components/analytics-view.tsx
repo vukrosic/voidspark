@@ -308,6 +308,25 @@ export default function AnalyticsView({
                   <span className="text-[#faf9f6]/55">No change</span> = the tweak
                   made no measurable difference (not a failure).
                 </p>
+                {/* Win rate — the headline for a research loop: of everything
+                    reviewed, what fraction actually improved the metric. */}
+                {(() => {
+                  const counts = data!.reviewerOutcomes;
+                  const reviewed = Object.values(counts).reduce((a, b) => a + b, 0);
+                  const wins = counts.WIN ?? counts.win ?? 0;
+                  if (reviewed === 0) return null;
+                  const pct = Math.round((wins / reviewed) * 100);
+                  return (
+                    <div className="mb-3 flex items-baseline gap-2">
+                      <span className="font-mono text-2xl tabular-nums text-emerald-200">
+                        {pct}%
+                      </span>
+                      <span className="text-[11px] text-[#faf9f6]/45">
+                        improved — {wins} of {reviewed} reviewed
+                      </span>
+                    </div>
+                  );
+                })()}
                 <div className="flex flex-wrap gap-2">
                   {Object.entries(data!.reviewerOutcomes)
                     .sort((a, b) => b[1] - a[1])

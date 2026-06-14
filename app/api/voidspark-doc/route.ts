@@ -39,8 +39,18 @@ export async function POST(req: Request) {
     const content = await readFile(full, 'utf8');
     return Response.json({ success: true, content, path: body.path }, { status: 200 });
   } catch (error) {
+    // Don't leak the absolute on-disk path in the error (public tool). Report
+    // missing files as a clean 404 keyed on the repo-relative path the UI asked
+    // for; everything else is a generic read failure.
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') {
+      return Response.json(
+        { success: false, error: `Not found: ${body.path}` },
+        { status: 404 },
+      );
+    }
     return Response.json(
-      { success: false, error: error instanceof Error ? error.message : 'unknown error' },
+      { success: false, error: `Could not read ${body.path}` },
       { status: 500 },
     );
   }
