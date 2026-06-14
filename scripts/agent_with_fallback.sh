@@ -15,19 +15,21 @@
 # Output streams live to stdout (the tmux pane / UI log viewer tails it).
 # Exit code is the fallback's if we fell back, else the primary's.
 #
-# macOS bash 3.2 compatible; no setsid (absent on Darwin) — we tree-kill via
-# pgrep -P instead.
+# macOS bash 3.2 / BSD grep compatible: no setsid (tree-kill via pgrep -P), and
+# the marker regex uses NO `{n,m}` intervals (BSD grep caps them and errors out,
+# which would silently disable detection).
 set -uo pipefail
 
 PRIMARY="${1:?usage: agent_with_fallback.sh <primary> <fallback> <prompt>}"
 FALLBACK="${2:?fallback cmd required}"
 PROMPT="${3:?prompt required}"
 
-# Markers that mean "MiniMax is out of tokens / rate-limited" — matched live
-# against the primary's streaming output. Targets the rate_limit retry events
-# and the Token Plan exhaustion message specifically, so a normal research
-# transcript that merely mentions "limit" doesn't trip it. Override via env.
-MARKERS="${MINIMAX_FALLBACK_REGEX:-error_status[^0-9]{0,4}429|\"error\"[^a-z]{0,4}rate_limit|rate_limit_error|用量上限|Token Plan 套餐|insufficient[^a-z]{0,15}(balance|quota|credit|token)|out of (tokens|credit)}"
+# Markers that mean "MiniMax is out of tokens / rate-limited", matched live
+# against the streaming output. The real signature (from a 429) is a stream-json
+# line like {... "error_status":429,"error":"rate_limit" ...} plus the Token Plan
+# exhaustion message. Specific enough that a normal research transcript won't
+# trip it. Override via env. NO interval quantifiers (BSD grep limitation).
+MARKERS="${MINIMAX_FALLBACK_REGEX:-rate_limit|error_status[^0-9]*429|用量上限|Token Plan|insufficient_balance|insufficient_quota|insufficient balance|insufficient quota|out of tokens|out of credit}"
 
 # Kill a pid and all its descendants (pgrep -P walks the tree). $2 = signal.
 kill_tree() {
@@ -38,7 +40,7 @@ kill_tree() {
   kill -"$sig" "$pid" 2>/dev/null || true
 }
 
-# Run "<cmd> <prompt>" in the current shell. The prompt is passed as a real
+# Run "<cmd> <prompt>" in the foreground. The prompt is passed as a real
 # positional arg ($1) to an inner bash -c, never string-interpolated, so a
 # prompt containing quotes/$/backticks can't break parsing. Any redirect baked
 # into <cmd> (e.g. `< /dev/null`) is parsed by that inner bash.
@@ -47,20 +49,26 @@ run_agent() {
 }
 
 LOG="$(mktemp "/tmp/agent_fallback.XXXXXX.log")"
-cleanup() { rm -f "$LOG" 2>/dev/null || true; }
+RCFILE="$(mktemp "/tmp/agent_fallback.XXXXXX.rc")"
+cleanup() { rm -f "$LOG" "$RCFILE" 2>/dev/null || true; }
 trap cleanup EXIT
 
-# Launch primary in the background, capturing combined output to LOG.
-run_agent "$PRIMARY" "$PROMPT" >"$LOG" 2>&1 &
+# Launch primary in the background, recording its exit code to RCFILE so we never
+# need `wait` (which would force us to keep the job, and print a "Terminated"
+# notice when we kill it). disown silences that notice; kill-by-pid still works.
+( run_agent "$PRIMARY" "$PROMPT"; echo "$?" >"$RCFILE" ) >"$LOG" 2>&1 &
 PRIMARY_PID=$!
+disown 2>/dev/null || true
 
-# Mirror the log to our stdout (pane/UI) in real time.
+# Mirror the log to our stdout (pane/UI) in real time; disown so killing the
+# tailer at the end is silent too.
 tail -n +1 -f "$LOG" 2>/dev/null &
 TAIL_PID=$!
+disown 2>/dev/null || true
 
 FELL_BACK=0
 RC=0
-# Poll while primary is alive: a marker hit means abort the retry loop now.
+# Poll while primary is alive: a marker hit means abort the retry loop NOW.
 while kill -0 "$PRIMARY_PID" 2>/dev/null; do
   if grep -qiE "$MARKERS" "$LOG"; then
     printf '\n[voidspark] MiniMax rate-limited / out of tokens — aborting retries, falling back to Codex\n'
@@ -73,16 +81,18 @@ while kill -0 "$PRIMARY_PID" 2>/dev/null; do
   sleep 1
 done
 
-# If it exited on its own, a non-zero code also triggers fallback.
+# Exited on its own: read the recorded code; non-zero (or missing) -> fall back.
 if [ "$FELL_BACK" -eq 0 ]; then
-  wait "$PRIMARY_PID"; RC=$?
+  for _ in 1 2 3 4 5; do [ -s "$RCFILE" ] && break; sleep 0.2; done
+  RC="$(cat "$RCFILE" 2>/dev/null || echo 1)"
+  case "$RC" in ''|*[!0-9]*) RC=1 ;; esac
   if [ "$RC" -ne 0 ]; then
     printf '\n[voidspark] MiniMax exited rc=%s — falling back to Codex\n' "$RC"
     FELL_BACK=1
   fi
 fi
 
-# Stop mirroring the primary's log before the fallback takes over stdout.
+# Stop mirroring before the fallback takes over stdout.
 sleep 0.3
 kill "$TAIL_PID" 2>/dev/null || true
 

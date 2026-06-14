@@ -1,7 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Lightbulb, LoaderCircle, Minus, Plus, RefreshCw, Settings2, Sparkles, Zap } from "lucide-react";
+import {
+  Activity,
+  Cpu,
+  FileText,
+  Gauge,
+  Lightbulb,
+  LoaderCircle,
+  Minus,
+  Play,
+  Plus,
+  Power,
+  RefreshCw,
+  Server,
+  Settings2,
+  Sparkles,
+  Terminal,
+  X,
+  Zap,
+} from "lucide-react";
 import { MarkdownPanel } from "@/components/markdown-panel";
 import AnalyticsView from "@/components/analytics-view";
 import DocumentationView from "@/components/documentation-view";
@@ -132,6 +150,10 @@ const GPU_IDLE_UTIL = 5;
 // Don't surface a momentary idle blip — only show the "gpu idle" timer once the
 // box has been idle continuously for at least this long.
 const GPU_IDLE_MIN_MS = 5_000;
+// A busy blip should not clear the idle clock immediately. Require the GPU to
+// stay above the busy threshold for this long before we say the box is "busy"
+// again and reset the idle timer.
+const GPU_BUSY_MIN_MS = 5_000;
 // The GPU box gets a second, more explicit idle timer in the UI, but only after
 // it's been idle long enough to matter. That keeps brief pauses from blinking
 // in and out of the card.
@@ -190,6 +212,17 @@ export default function LaunchCodexPage() {
     needsRun: number;
     floor: number;
     ceiling: number;
+  } | null>(null);
+  // MiniMax Token Plan quota (polled from /api/minimax-usage). When the 5-hour
+  // interval is exhausted MiniMax 429s and the launcher falls back to Codex —
+  // this badge makes that visible and counts down to the reset.
+  const [minimaxUsage, setMinimaxUsage] = useState<{
+    ok: boolean;
+    intervalPercent?: number;
+    weeklyPercent?: number;
+    exhausted?: boolean;
+    intervalResetAt?: number;
+    error?: string;
   } | null>(null);
   // Free-text instructions appended to the GPU runner agent's prompt (e.g. a
   // one-off Vast.ai bash command). Persisted server-side via /api/runner-extra.
@@ -264,13 +297,15 @@ export default function LaunchCodexPage() {
   // Epoch ms the GPU first went idle (util < GPU_IDLE_UTIL) in the current idle
   // stretch, or null while it's working. Set in the poll, counted up live by the
   // 1s `now` ticker → "idle Ns since last busy". Lets the operator spot a box
-  // doing no work, and resets as soon as utilization turns nontrivial again.
+  // doing no work, and only resets after a sustained busy period.
   const [gpuIdleSince, setGpuIdleSince] = useState<number | null>(null);
   // Whether the remote training tmux (`arq`) is alive right now — only true
   // while a run is active. Drives the "Attach GPU" button.
   const [arqAlive, setArqAlive] = useState(false);
   // Guards against overlapping usage polls when a request is slow / box is down.
   const usageInFlight = useRef(false);
+  // Busy streak start time for debouncing the idle-clock reset.
+  const gpuBusySince = useRef<number | null>(null);
   // A 1s ticker so "updated Ns ago" labels stay live between polls.
   const [now, setNow] = useState(() => Date.now());
 
@@ -378,6 +413,7 @@ export default function LaunchCodexPage() {
       const data = await response.json().catch(() => ({}));
       setGpuUsageLatencyMs(Date.now() - startedAt);
       if (data.success) {
+        const fetchedAt = Date.now();
         const util = Number(data.utilization) || 0;
         setGpuUsage({
           name: data.name ?? "",
@@ -386,12 +422,22 @@ export default function LaunchCodexPage() {
           memTotal: Number(data.memTotal) || 0,
         });
         setGpuUsageStale(false);
-        setGpuUsageAt(Date.now());
-        // Open an idle stretch the first poll util drops low; close it the
-        // moment work resumes. Keeps the existing start time while still idle.
-        setGpuIdleSince((prev) =>
-          util < GPU_IDLE_UTIL ? prev ?? Date.now() : null
-        );
+        setGpuUsageAt(fetchedAt);
+        if (util < GPU_IDLE_UTIL) {
+          gpuBusySince.current = null;
+          // Open an idle stretch the first poll util drops low; keep the
+          // existing start time while still idle.
+          setGpuIdleSince((prev) => prev ?? fetchedAt);
+        } else {
+          const busySince = gpuBusySince.current ?? fetchedAt;
+          gpuBusySince.current = busySince;
+          // Only clear the idle clock once the GPU has stayed busy long
+          // enough to count as a real return to work.
+          if (fetchedAt - busySince >= GPU_BUSY_MIN_MS) {
+            setGpuIdleSince(null);
+            gpuBusySince.current = null;
+          }
+        }
       } else {
         setGpuUsageStale(true);
       }
@@ -579,6 +625,37 @@ export default function LaunchCodexPage() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [refreshGpuUsage]);
+
+  // Poll MiniMax token-plan quota every 60s (cheap remote call; the window only
+  // moves on a 5-hour cadence so high frequency is pointless). Pauses when the
+  // tab is hidden.
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      try {
+        const res = await fetch("/api/minimax-usage/", { cache: "no-store" });
+        setMinimaxUsage(await res.json());
+      } catch {
+        /* transient — keep last value */
+      }
+    };
+    const start = () => {
+      if (interval) return;
+      tick();
+      interval = setInterval(tick, 60000);
+    };
+    const stop = () => {
+      if (interval) clearInterval(interval);
+      interval = null;
+    };
+    const onVisibility = () => (document.hidden ? stop() : start());
+    if (!document.hidden) start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
 
   // 1s ticker so "updated Ns ago" labels count up between polls. Pauses with
   // the tab hidden. Cheap: just bumps a timestamp.
@@ -1403,11 +1480,11 @@ export default function LaunchCodexPage() {
   // Tailwind can't pick dynamic class names from a string lookup, so resolve
   // the per-tone styles to a literal object — keeps the JIT happy.
   const HEALTH_TONE_STYLES: Record<HealthTone, string> = {
-    ok: "border-emerald-400/30 bg-emerald-400/[0.07] text-emerald-100",
-    warn: "border-amber-300/30 bg-amber-300/[0.07] text-amber-100",
-    alert: "border-red-400/30 bg-red-400/[0.08] text-red-100",
-    info: "border-cyan-300/30 bg-cyan-300/[0.07] text-cyan-100",
-    muted: "border-white/10 bg-white/[0.04] text-[#faf9f6]/70",
+    ok: "border-emerald-400/20 bg-white/[0.025] text-emerald-100",
+    warn: "border-amber-300/20 bg-white/[0.025] text-amber-100",
+    alert: "border-red-400/25 bg-red-400/[0.035] text-red-100",
+    info: "border-cyan-300/20 bg-white/[0.025] text-cyan-100",
+    muted: "border-white/10 bg-white/[0.025] text-[#faf9f6]/70",
   };
   const HEALTH_DOT_STYLES: Record<HealthTone, string> = {
     ok: "bg-emerald-400",
@@ -1421,7 +1498,7 @@ export default function LaunchCodexPage() {
   // expanded to follow (and scroll back through) its saved log.
   const renderSessionList = (list: Session[], emptyText: string, location = "Local · Mac") =>
     list.length === 0 ? (
-      <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm text-[#faf9f6]/40">
+      <p className="rounded-md border border-white/10 bg-white/[0.02] px-4 py-4 text-center text-sm text-[#faf9f6]/40">
         {emptyText}
       </p>
     ) : (
@@ -1432,15 +1509,15 @@ export default function LaunchCodexPage() {
           return (
             <li
               key={session.name}
-              className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
+              className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2.5"
             >
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
                     <p className="truncate font-mono text-sm text-[#faf9f6]">
                       {session.name}
                     </p>
-                    <span className="shrink-0 rounded-full border border-sky-300/25 bg-sky-300/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.14em] text-sky-200/80">
+                    <span className="shrink-0 rounded border border-sky-300/20 bg-sky-300/[0.06] px-1.5 py-0.5 text-[9px] font-medium text-sky-200/75">
                       {location}
                     </span>
                   </div>
@@ -1456,25 +1533,40 @@ export default function LaunchCodexPage() {
                   <button
                     type="button"
                     onClick={() => toggleLog(session.name)}
-                    className="rounded-full border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20"
+                    title={open ? "Hide log" : "Show logs"}
+                    aria-label={open ? `Hide log for ${session.name}` : `Show logs for ${session.name}`}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.03] px-2 text-xs font-medium text-[#faf9f6]/65 transition hover:border-white/25 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20"
                   >
-                    {open ? "Hide log" : "Logs"}
+                    <FileText className="h-3.5 w-3.5" aria-hidden />
+                    <span className="hidden sm:inline">{open ? "Hide" : "Logs"}</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleAttach(session.name)}
                     disabled={attaching === session.name}
-                    className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Attach tmux session"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {attaching === session.name ? "…" : "Attach"}
+                    {attaching === session.name ? (
+                      <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Terminal className="h-3.5 w-3.5" aria-hidden />
+                    )}
+                    <span className="hidden sm:inline">Attach</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleKill(session.name)}
                     disabled={killing === session.name}
-                    className="rounded-full border border-red-400/30 bg-red-400/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-red-300 transition hover:border-red-400/60 hover:bg-red-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-red-400/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Kill tmux session"
+                    aria-label={`Kill ${session.name}`}
+                    className="inline-flex h-8 items-center justify-center rounded-md border border-red-400/25 bg-red-400/[0.07] px-2 text-xs font-medium text-red-300 transition hover:border-red-400/50 hover:bg-red-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-red-400/35 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {killing === session.name ? "Killing…" : "Kill"}
+                    {killing === session.name ? (
+                      <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <X className="h-3.5 w-3.5" aria-hidden />
+                    )}
                   </button>
                 </div>
               </div>
@@ -1606,7 +1698,7 @@ export default function LaunchCodexPage() {
     return (
       <li
         key={idea.id}
-        className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
+        className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2.5"
       >
         <div className="flex items-start justify-between gap-3">
           <button
@@ -1644,7 +1736,7 @@ export default function LaunchCodexPage() {
               )}
               <span
                 title={idea.status}
-                className={`rounded-full border px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] ${statusMeta(idea.status).cls}`}
+                className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusMeta(idea.status).cls}`}
               >
                 {statusMeta(idea.status).label}
               </span>
@@ -1667,8 +1759,9 @@ export default function LaunchCodexPage() {
                       title: `${idea.title} — evidence`,
                     })
                   }
-                  className="rounded-full border border-fuchsia-300/30 bg-fuchsia-300/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-fuchsia-200 transition hover:border-fuchsia-300/60 hover:bg-fuchsia-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/40"
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-fuchsia-300/25 bg-fuchsia-300/[0.07] px-2 text-[11px] font-medium text-fuchsia-200 transition hover:border-fuchsia-300/50 hover:bg-fuchsia-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/35"
                 >
+                  <FileText className="h-3.5 w-3.5" aria-hidden />
                   Evidence
                 </button>
               )}
@@ -1685,8 +1778,9 @@ export default function LaunchCodexPage() {
                     )
                   }
                   disabled={busy}
-                  className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-orange-400/25 bg-orange-400/[0.07] px-2 text-[11px] font-medium text-orange-300 transition hover:border-orange-400/50 hover:bg-orange-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  <RefreshCw className="h-3.5 w-3.5" aria-hidden />
                   {idea.status === "running" ? "Requeue" : "Reset"}
                 </button>
               )}
@@ -1695,9 +1789,14 @@ export default function LaunchCodexPage() {
                   type="button"
                   onClick={() => handleAttach(liveSessionName)}
                   disabled={attaching === liveSessionName}
-                  className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {attaching === liveSessionName ? "..." : "Attach"}
+                  {attaching === liveSessionName ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Terminal className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  Attach
                 </button>
               ) : (canImplement && !autoImplementOn) ||
                 (isStuck && idea.status !== "running") ? (
@@ -1708,12 +1807,17 @@ export default function LaunchCodexPage() {
                   type="button"
                   onClick={() => handleImplement(idea.id)}
                   disabled={busy}
-                  className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-emerald-300 transition hover:border-emerald-400/60 hover:bg-emerald-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-2 text-[11px] font-medium text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
+                  {busy ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Zap className="h-3.5 w-3.5" aria-hidden />
+                  )}
                   {busy ? "Launching…" : isStuck ? "Retry" : "Implement"}
                 </button>
               ) : idea.status === "needs-run" ? (
-                <span className="rounded-full border border-cyan-300/20 bg-cyan-300/5 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200/70">
+                <span className="inline-flex h-7 items-center rounded-md border border-cyan-300/20 bg-cyan-300/5 px-2 text-[11px] font-medium text-cyan-200/70">
                   Queued
                 </span>
               ) : null}
@@ -2196,105 +2300,165 @@ export default function LaunchCodexPage() {
             </div>
           )}
 
-          {/* Idea-work tmux sessions (generate + implement) */}
-          <div className="mt-6">
-            <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200/50">
-              Idea-work tmux ({ideaSessions.length})
-            </h3>
-            {renderSessionList(ideaSessions, "No generate/implement sessions running.")}
-          </div>
+	          {/* Idea-work tmux sessions (generate + implement) */}
+	          <div className="mt-6">
+	            <div className="mb-2 flex items-center gap-2 text-[11px] text-amber-200/55">
+	              <Terminal className="h-3.5 w-3.5" aria-hidden />
+	              <h3 className="font-medium uppercase tracking-normal">Idea work</h3>
+	              <span className="font-mono text-[#faf9f6]/35">{ideaSessions.length}</span>
+	            </div>
+	            {renderSessionList(ideaSessions, "No generate/implement sessions running.")}
+	          </div>
         </section>
 
         {/* ================= SECTION 2 · GPU RUNS ================= */}
-        <section className="mt-16 w-full max-w-2xl">
-          <div className="mb-5 flex items-end justify-between gap-3 border-b border-cyan-300/20 pb-3">
-            <div className="flex items-center gap-3">
-              <span className="h-7 w-1 rounded-full bg-cyan-300/70" />
+        <section className="mt-16 w-full max-w-4xl">
+          <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-cyan-300/20 bg-cyan-300/[0.06] text-cyan-200">
+                <Cpu className="h-4 w-4" aria-hidden />
+              </span>
               <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.28em] text-cyan-200">
+                <h2 className="text-sm font-semibold uppercase tracking-normal text-cyan-100">
                   GPU runs
                 </h2>
                 <p className="text-[11px] text-[#faf9f6]/40">
-                  Run the queued A/Bs on the Vast box and watch the GPU live.
+                  Queue, launch, and watch A/Bs.
                 </p>
               </div>
             </div>
           </div>
 
           {/* GPU queue */}
-          <div className="w-full rounded-xl border border-cyan-300/15 bg-cyan-300/[0.04] px-4 py-4">
+          <div className="w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-200/70">
-                GPU queue
-              </h2>
-              <p className="mt-1 text-xs text-[#faf9f6]/45">
-                {runningIdeas.length} running · {queuedIdeas.length} ready
-              </p>
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-cyan-300/[0.08] text-cyan-200/80">
+                <Activity className="h-3.5 w-3.5" aria-hidden />
+              </span>
+              <div>
+                <h2 className="text-xs font-semibold uppercase tracking-normal text-cyan-100/80">
+                  GPU queue
+                </h2>
+                <p className="text-xs text-[#faf9f6]/45">
+                  {runningIdeas.length} running · {queuedIdeas.length} ready
+                </p>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* MiniMax quota badge. Red when the 5-hour window is exhausted —
+                  in that state the launcher auto-falls-back to Codex, and we
+                  count down to when MiniMax becomes usable again. */}
+              {minimaxUsage &&
+                (minimaxUsage.ok ? (
+                  (() => {
+                    const resetMin =
+                      minimaxUsage.intervalResetAt != null
+                        ? Math.max(
+                            0,
+                            Math.round((minimaxUsage.intervalResetAt - now) / 60000)
+                          )
+                        : null;
+                    return (
+	                      <span
+	                        title={`MiniMax Token Plan — 5h window: ${minimaxUsage.intervalPercent}% left, weekly: ${minimaxUsage.weeklyPercent}% left.${
+	                          minimaxUsage.exhausted
+	                            ? " Window exhausted → agents fall back to Codex until it resets."
+	                            : ""
+	                        }`}
+	                        className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium ${
+	                          minimaxUsage.exhausted
+	                            ? "border-rose-400/50 bg-rose-400/15 text-rose-200"
+	                            : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60"
+	                        }`}
+	                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            minimaxUsage.exhausted ? "bg-rose-400" : "bg-emerald-400"
+                          }`}
+                        />
+                        {minimaxUsage.exhausted
+                          ? `MiniMax out${
+                              resetMin != null
+                                ? ` · ${resetMin < 1 ? "<1" : resetMin}m`
+                                : ""
+                            } → Codex`
+                          : `MiniMax ${minimaxUsage.intervalPercent}%`}
+                      </span>
+                    );
+                  })()
+                ) : (
+	                  <span
+	                    title={`MiniMax quota unavailable: ${minimaxUsage.error ?? "unknown"}`}
+	                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.02] px-2.5 text-xs font-medium text-[#faf9f6]/35"
+	                  >
+	                    <span className="h-1.5 w-1.5 rounded-full bg-[#faf9f6]/30" />
+	                    MiniMax ?
+                  </span>
+                ))}
               <button
                 type="button"
                 onClick={handleToggleAutopilot}
                 disabled={autopilotBusy}
-                title={
-                  autopilotOn
-                    ? `Autopilot is ON — the whole pipeline self-runs: stuck gates advance, ideas refill below ${autopilotInfo?.floor ?? 5} (cap ${autopilotInfo?.ceiling ?? 20}), and the GPU drains. Click to stop.`
-                    : "Autopilot is OFF. Click to run the entire pipeline automatically — reviews, fixes, idea generation, and GPU runs."
-                }
-                className={`flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
-                  autopilotOn
-                    ? "border-violet-400/50 bg-violet-400/15 text-violet-200 hover:bg-violet-400/25 focus:ring-violet-400/40"
-                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
-                }`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    autopilotOn ? "animate-pulse bg-violet-400" : "bg-[#faf9f6]/40"
-                  }`}
-                />
-                {autopilotBusy
-                  ? "…"
-                  : autopilotOn
-                    ? `Autopilot on${autopilotInfo ? ` · ${autopilotInfo.inFlight} in flight` : ""}`
-                    : "Autopilot off"}
-              </button>
+	                title={
+	                  autopilotOn
+	                    ? `Autopilot is ON — the whole pipeline self-runs: stuck gates advance, ideas refill below ${autopilotInfo?.floor ?? 5} (cap ${autopilotInfo?.ceiling ?? 20}), and the GPU drains. Click to stop.`
+	                    : "Autopilot is OFF. Click to run the entire pipeline automatically — reviews, fixes, idea generation, and GPU runs."
+	                }
+	                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+	                  autopilotOn
+	                    ? "border-violet-400/50 bg-violet-400/15 text-violet-200 hover:bg-violet-400/25 focus:ring-violet-400/40"
+	                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+	                }`}
+	              >
+	                <Power className={`h-3.5 w-3.5 ${autopilotOn ? "fill-violet-300/25" : ""}`} aria-hidden />
+	                {autopilotBusy
+	                  ? "Saving"
+	                  : autopilotOn
+	                    ? `Pilot on${autopilotInfo ? ` · ${autopilotInfo.inFlight}` : ""}`
+	                    : "Pilot off"}
+	              </button>
               <button
                 type="button"
                 onClick={handleToggleAutorun}
                 disabled={autorunBusy}
-                title={
-                  autorunOn
-                    ? "Autorun is ON — each finished run auto-launches the next queued idea. Click to stop."
-                    : "Autorun is OFF. Click to march through the queue automatically (one run at a time)."
-                }
-                className={`flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
-                  autorunOn
-                    ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 hover:bg-emerald-400/25 focus:ring-emerald-400/40"
-                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
-                }`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    autorunOn ? "animate-pulse bg-emerald-400" : "bg-[#faf9f6]/40"
-                  }`}
-                />
-                {autorunBusy ? "…" : autorunOn ? "Autorun on" : "Autorun off"}
-              </button>
+	                title={
+	                  autorunOn
+	                    ? "Autorun is ON — each finished run auto-launches the next queued idea. Click to stop."
+	                    : "Autorun is OFF. Click to march through the queue automatically (one run at a time)."
+	                }
+	                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+	                  autorunOn
+	                    ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 hover:bg-emerald-400/25 focus:ring-emerald-400/40"
+	                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+	                }`}
+	              >
+	                {autorunBusy ? (
+	                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+	                ) : (
+	                  <Play className={`h-3.5 w-3.5 ${autorunOn ? "fill-emerald-300/25" : ""}`} aria-hidden />
+	                )}
+	                {autorunBusy ? "Saving" : autorunOn ? "Autorun" : "Manual"}
+	              </button>
               {/* Manual single-run only makes sense when autorun is off — when
                   it's on, the lab-autorun runner agent drains the queue itself. */}
               {!autorunOn && (
-                <button
-                  type="button"
-                  onClick={handleRunNext}
-                  disabled={isRunningNext || gpuBusy || queuedIdeas.length === 0}
-                  className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isRunningNext
-                    ? "Launching..."
-                    : gpuBusy
-                      ? "GPU busy"
-                      : queuedIdeas.length === 0
+	                <button
+	                  type="button"
+	                  onClick={handleRunNext}
+	                  disabled={isRunningNext || gpuBusy || queuedIdeas.length === 0}
+	                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2.5 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
+	                >
+	                  {isRunningNext ? (
+	                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+	                  ) : (
+	                    <Play className="h-3.5 w-3.5" aria-hidden />
+	                  )}
+	                  {isRunningNext
+	                    ? "Launching"
+	                    : gpuBusy
+	                      ? "GPU busy"
+	                      : queuedIdeas.length === 0
                         ? "Queue empty"
                         : "Run next"}
                 </button>
@@ -2306,37 +2470,37 @@ export default function LaunchCodexPage() {
               the operator whether to wait, attach, requeue, or fix config. */}
           <div
             role="status"
-            aria-live="polite"
-            data-testid="queue-health"
-            data-state={queueHealth.state}
-            className={`mt-3 flex items-start gap-3 rounded-lg border px-3 py-2.5 ${HEALTH_TONE_STYLES[queueHealth.tone]}`}
-          >
-            <span
-              aria-hidden
-              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${HEALTH_DOT_STYLES[queueHealth.tone]} ${
-                queueHealth.tone === "ok" || queueHealth.tone === "info"
-                  ? "animate-pulse"
-                  : ""
-              }`}
-            />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.22em] opacity-70">
-                  Queue health
-                </span>
-                <span className="text-sm font-semibold text-[#faf9f6]">
-                  {queueHealth.label}
-                </span>
-                <span className="rounded-full border border-current/30 bg-black/20 px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.16em] opacity-80">
-                  {queueHealth.badge}
-                </span>
-              </div>
-              <p className="mt-0.5 text-xs leading-snug">
-                {queueHealth.nextAction}
-              </p>
-              <p className="mt-1.5 font-mono text-[10px] tabular-nums opacity-70">
-                {runningIdeas.length} running · {queuedIdeas.length} ready · {stuckCount} stuck
-                {" · "}
+	            aria-live="polite"
+	            data-testid="queue-health"
+	            data-state={queueHealth.state}
+	            className={`mt-3 rounded-md border px-3 py-2.5 ${HEALTH_TONE_STYLES[queueHealth.tone]}`}
+	          >
+	            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+	              <div className="flex min-w-0 items-center gap-2">
+	                <span
+	                  aria-hidden
+	                  className={`h-2 w-2 shrink-0 rounded-full ${HEALTH_DOT_STYLES[queueHealth.tone]} ${
+	                    queueHealth.tone === "ok" || queueHealth.tone === "info"
+	                      ? "animate-pulse"
+	                      : ""
+	                  }`}
+	                />
+	                <Gauge className="h-3.5 w-3.5 shrink-0 opacity-70" aria-hidden />
+	                <span className="text-sm font-semibold text-[#faf9f6]">
+	                  {queueHealth.label}
+	                </span>
+	                <span className="rounded border border-current/25 bg-black/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] opacity-70">
+	                  {queueHealth.badge}
+	                </span>
+	              </div>
+	              <p className="text-xs leading-snug text-[#faf9f6]/55 sm:max-w-md sm:text-right">
+	                {queueHealth.nextAction}
+	              </p>
+	            </div>
+	            <div className="min-w-0">
+	              <p className="mt-1.5 font-mono text-[10px] tabular-nums opacity-70">
+	                {runningIdeas.length} running · {queuedIdeas.length} ready · {stuckCount} stuck
+	                {" · "}
                 {liveRunCount} supervisor
                 {" · "}arq {arqAlive ? "live" : "idle"}
                 {gpuUsage && !gpuUsageStale ? ` · gpu ${gpuUsage.utilization}%` : ""}
@@ -2364,28 +2528,35 @@ export default function LaunchCodexPage() {
 
           {/* Operator instructions appended to the GPU runner agent's prompt —
               e.g. a one-off Vast.ai bash command. Applies to the next launch. */}
-          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.02]">
-            <button
-              type="button"
-              onClick={() => setRunnerExtraOpen((v) => !v)}
-              aria-expanded={runnerExtraOpen}
-              className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
-            >
-              <span className="min-w-0">
-                <span className="block text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/55">
-                  Runner instructions
-                </span>
-                <span className="mt-0.5 block truncate text-[11px] text-[#faf9f6]/35">
-                  {runnerExtra
-                    ? "Custom text saved for the next Vast.ai runner launch."
-                    : "Optional one-off text appended to the next runner prompt."}
-                </span>
-              </span>
-              <span className="shrink-0 font-mono text-sm text-[#faf9f6]/40">
-                {runnerExtraOpen ? "−" : "+"}
-              </span>
-            </button>
-            {runnerExtraOpen && (
+	          <div className="mt-4 rounded-md border border-white/10 bg-white/[0.02]">
+	            <button
+	              type="button"
+	              onClick={() => setRunnerExtraOpen((v) => !v)}
+	              aria-expanded={runnerExtraOpen}
+	              className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
+	            >
+	              <span className="flex min-w-0 items-center gap-2.5">
+	                <Terminal className="h-3.5 w-3.5 shrink-0 text-cyan-200/70" aria-hidden />
+	                <span className="min-w-0">
+	                  <span className="block text-xs font-medium text-[#faf9f6]/70">
+	                    Runner instructions
+	                  </span>
+	                  <span className="mt-0.5 block truncate text-[11px] text-[#faf9f6]/35">
+	                    {runnerExtra
+	                      ? "Custom text saved for the next launch."
+	                      : "Optional one-off prompt text."}
+	                  </span>
+	                </span>
+	              </span>
+	              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.03] text-[#faf9f6]/45">
+	                {runnerExtraOpen ? (
+	                  <Minus className="h-3.5 w-3.5" aria-hidden />
+	                ) : (
+	                  <Plus className="h-3.5 w-3.5" aria-hidden />
+	                )}
+	              </span>
+	            </button>
+	            {runnerExtraOpen && (
               <div className="border-t border-white/10 p-3 pt-2">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <label
@@ -2400,14 +2571,15 @@ export default function LaunchCodexPage() {
                     {runnerExtraMsg}
                   </span>
                 )}
-                <button
-                  type="button"
-                  onClick={handleSaveRunnerExtra}
-                  disabled={runnerExtraSaving}
-                  className="rounded-full border border-white/15 bg-white/[0.04] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {runnerExtraSaving ? "Saving…" : "Save"}
-                </button>
+	                <button
+	                  type="button"
+	                  onClick={handleSaveRunnerExtra}
+	                  disabled={runnerExtraSaving}
+	                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-white/15 bg-white/[0.04] px-2 text-[11px] font-medium text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+	                >
+	                  {runnerExtraSaving && <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />}
+	                  {runnerExtraSaving ? "Saving" : "Save"}
+	                </button>
               </div>
                 </div>
                 <textarea
@@ -2427,28 +2599,13 @@ export default function LaunchCodexPage() {
             <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm text-[#faf9f6]/40">
               No ready GPU work.
             </p>
-          ) : (
-            <>
-              {staleRunningIdeas.length > 0 && (
-                <div className="mt-4 flex items-center gap-2 rounded-lg border border-orange-300/20 bg-orange-300/[0.06] px-3 py-2.5">
-                  <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-orange-300" />
-                  <p className="text-xs text-[#faf9f6]/55">
-                    <span className="font-semibold text-orange-200/80">
-                      {staleRunningIdeas.length} stale run
-                      {staleRunningIdeas.length === 1 ? "" : "s"}
-                    </span>{" "}
-                    — marked running with no live supervisor. Auto-requeuing to
-                    the queue
-                    {arqAlive && currentRunIdea ? " (current remote run excluded)" : ""}.
-                  </p>
-                </div>
-              )}
-
-              {!gpuQueueExpanded && gpuQueue.length > compactGpuQueue.length && (
-                <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-[#faf9f6]/35">
-                  Showing current run and next queued items
-                </p>
-              )}
+	          ) : (
+	            <>
+	              {!gpuQueueExpanded && gpuQueue.length > compactGpuQueue.length && (
+	                <p className="mt-3 text-[11px] text-[#faf9f6]/35">
+	                  Showing current run and next queued items
+	                </p>
+	              )}
 
               <ul className="mt-3 space-y-2">
                 {visibleGpuQueue.map((idea) => {
@@ -2460,10 +2617,10 @@ export default function LaunchCodexPage() {
                   const queuePosition = queuedIdeas.findIndex((queued) => queued.id === idea.id) + 1;
 
                   return (
-                    <li
-                      key={idea.id}
-                      className="flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5"
-                    >
+	                    <li
+	                      key={idea.id}
+	                      className="flex items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.025] px-3 py-2.5"
+	                    >
                       <button
                         type="button"
                         onClick={() =>
@@ -2489,11 +2646,11 @@ export default function LaunchCodexPage() {
                             {timeInState(idea.updated)}
                           </span>
                         )}
-                        {isCurrentRun && (
-                          <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] text-emerald-200/90">
-                            current
-                          </span>
-                        )}
+	                        {isCurrentRun && (
+	                          <span className="rounded border border-emerald-300/25 bg-emerald-300/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-emerald-200/90">
+	                            current
+	                          </span>
+	                        )}
                         {isRunLive && (
                           <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.15em] text-emerald-300">
                             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
@@ -2505,22 +2662,27 @@ export default function LaunchCodexPage() {
                             stuck
                           </span>
                         )}
-                        {idea.status === "needs-run" && queuePosition > 0 && (
-                          <span className="rounded-full border border-cyan-300/20 bg-cyan-300/5 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.15em] text-cyan-200/80">
-                            #{queuePosition}
-                          </span>
-                        )}
+	                        {idea.status === "needs-run" && queuePosition > 0 && (
+	                          <span className="rounded border border-cyan-300/20 bg-cyan-300/5 px-1.5 py-0.5 text-[10px] font-medium text-cyan-200/80">
+	                            #{queuePosition}
+	                          </span>
+	                        )}
                         {isRunLive ? (
                           <button
                             type="button"
                             onClick={() => handleAttach(sessionName)}
-                            disabled={attaching === sessionName}
-                            title="Attach the local supervisor tmux (SSHes the box, polls, writes evidence). Not the GPU itself — use the GPU box panel below for that."
-                            className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-200 transition hover:border-cyan-300/60 hover:bg-cyan-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/40 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {attaching === sessionName ? "..." : "Runner"}
-                          </button>
-                        ) : isRunStuck ? (
+	                            disabled={attaching === sessionName}
+	                            title="Attach the local supervisor tmux (SSHes the box, polls, writes evidence). Not the GPU itself — use the GPU box panel below for that."
+	                            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
+	                          >
+	                            {attaching === sessionName ? (
+	                              <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+	                            ) : (
+	                              <Terminal className="h-3.5 w-3.5" aria-hidden />
+	                            )}
+	                            Runner
+	                          </button>
+	                        ) : isRunStuck ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -2529,12 +2691,13 @@ export default function LaunchCodexPage() {
                                 "needs-run",
                                 "requeued stuck GPU run from UI"
                               )
-                            }
-                            disabled={implementing === idea.id}
-                            className="rounded-full border border-orange-400/30 bg-orange-400/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-orange-300 transition hover:border-orange-400/60 hover:bg-orange-400/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/40 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            Requeue
-                          </button>
+	                            }
+	                            disabled={implementing === idea.id}
+	                            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-orange-400/25 bg-orange-400/[0.07] px-2 text-[11px] font-medium text-orange-300 transition hover:border-orange-400/50 hover:bg-orange-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/35 disabled:cursor-not-allowed disabled:opacity-50"
+	                          >
+	                            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+	                            Requeue
+	                          </button>
                         ) : null}
                       </div>
                     </li>
@@ -2555,24 +2718,28 @@ export default function LaunchCodexPage() {
               )}
             </>
           )}
-        </div>
+	        </div>
 
-        {/* GPU box — the real training, in tmux `arq` on the remote Vast box */}
-        <div className="mt-6 w-full max-w-2xl rounded-xl border border-fuchsia-300/15 bg-fuchsia-300/[0.04] px-4 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-xs font-semibold uppercase tracking-[0.24em] text-fuchsia-200/70">
-                  GPU box
-                </h2>
-                <span className="rounded-full border border-fuchsia-300/25 bg-fuchsia-300/10 px-2 py-0.5 text-[9px] uppercase tracking-[0.14em] text-fuchsia-200/80">
-                  Remote · Vast GPU
-                </span>
-              </div>
-              <p className="mt-1 text-xs text-[#faf9f6]/45">
-                {gpuInfo?.host ? `${gpuInfo.host} · ` : ""}
-                {arqAlive ? (
-                  <span className="text-emerald-300">tmux arq live</span>
+	        {/* GPU box — the real training, in tmux `arq` on the remote Vast box */}
+	        <div className="mt-6 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-3">
+	          <div className="flex flex-wrap items-center justify-between gap-3">
+	            <div className="flex min-w-0 items-start gap-2.5">
+	              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-fuchsia-300/[0.08] text-fuchsia-200/80">
+	                <Server className="h-3.5 w-3.5" aria-hidden />
+	              </span>
+	              <div className="min-w-0">
+	                <div className="flex flex-wrap items-center gap-2">
+	                  <h2 className="text-xs font-semibold uppercase tracking-normal text-fuchsia-100/80">
+	                    GPU box
+	                  </h2>
+	                  <span className="rounded border border-fuchsia-300/20 bg-fuchsia-300/[0.07] px-1.5 py-0.5 text-[9px] font-medium text-fuchsia-200/75">
+	                    Vast
+	                  </span>
+	                </div>
+	              <p className="mt-0.5 text-xs text-[#faf9f6]/45">
+	                {gpuInfo?.host ? `${gpuInfo.host} · ` : ""}
+	                {arqAlive ? (
+	                  <span className="text-emerald-300">tmux arq live</span>
                 ) : (
                   "tmux arq idle (starts when a run is active)"
                 )}
@@ -2586,36 +2753,44 @@ export default function LaunchCodexPage() {
                     new Date(gpuIdleSince).toISOString()
                   )}`}
                 >
-                  idle {formatAgo(now - gpuIdleSince)} since last busy
-                </p>
-              ) : null}
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={refreshGpu}
-                disabled={gpuLoading}
-                className="rounded-full border border-fuchsia-300/30 bg-fuchsia-300/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-fuchsia-200 transition hover:border-fuchsia-300/60 hover:bg-fuchsia-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/40 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {gpuLoading ? "Checking…" : "Refresh"}
-              </button>
-              <button
-                type="button"
+	                  idle {formatAgo(now - gpuIdleSince)} since last busy
+	                </p>
+	              ) : null}
+	              </div>
+	            </div>
+	            <div className="flex items-center gap-1.5">
+	              <button
+	                type="button"
+	                onClick={refreshGpu}
+	                disabled={gpuLoading}
+	                aria-label="Refresh GPU box"
+	                title="Refresh GPU box"
+	                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-fuchsia-300/25 bg-fuchsia-300/[0.07] text-fuchsia-200 transition hover:border-fuchsia-300/50 hover:bg-fuchsia-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/35 disabled:cursor-not-allowed disabled:opacity-50"
+	              >
+	                {gpuLoading ? (
+	                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+	                ) : (
+	                  <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+	                )}
+	              </button>
+	              <button
+	                type="button"
                 onClick={handleAttachGpu}
                 disabled={attaching === "__gpu__" || !arqAlive}
                 title={
                   arqAlive
                     ? "Open a Terminal SSH'd into the live remote GPU tmux (arq)."
-                    : "No live GPU run. The arq tmux only exists while a run is active — start one with Run next."
-                }
-                className="rounded-full border border-fuchsia-300/30 bg-fuchsia-300/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-fuchsia-200 transition hover:border-fuchsia-300/60 hover:bg-fuchsia-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/40 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {attaching === "__gpu__"
-                  ? "…"
-                  : arqAlive
-                    ? "Attach GPU"
-                    : "GPU idle"}
-              </button>
+	                    : "No live GPU run. The arq tmux only exists while a run is active — start one with Run next."
+	                }
+	                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-fuchsia-300/25 bg-fuchsia-300/[0.07] px-2.5 text-xs font-medium text-fuchsia-200 transition hover:border-fuchsia-300/50 hover:bg-fuchsia-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/35 disabled:cursor-not-allowed disabled:opacity-50"
+	              >
+	                {attaching === "__gpu__" ? (
+	                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+	                ) : (
+	                  <Terminal className="h-3.5 w-3.5" aria-hidden />
+	                )}
+	                {arqAlive ? "Attach" : "Idle"}
+	              </button>
             </div>
           </div>
 
@@ -2718,41 +2893,46 @@ export default function LaunchCodexPage() {
           )}
         </div>
 
-          {/* Run-supervisor tmux sessions (lab-run-*) */}
-          <div className="mt-6">
-            <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-cyan-200/50">
-              Run-supervisor tmux ({runSessions.length})
-            </h3>
-            <p className="mb-2 text-[11px] text-[#faf9f6]/35">
-              These local sessions SSH the box, poll STATUS, and write evidence —
-              the training itself runs in tmux <span className="font-mono">arq</span> on the box (above).
-            </p>
-            {renderSessionList(runSessions, "No run supervisors active.")}
-          </div>
-        </section>
+	          {/* Run-supervisor tmux sessions (lab-run-*) */}
+	          <div className="mt-6">
+	            <div className="mb-2 flex items-center gap-2 text-[11px] text-cyan-200/55">
+	              <Terminal className="h-3.5 w-3.5" aria-hidden />
+	              <h3 className="font-medium uppercase tracking-normal">Run supervisors</h3>
+	              <span className="font-mono text-[#faf9f6]/35">{runSessions.length}</span>
+	            </div>
+	            <p className="mb-2 text-[11px] text-[#faf9f6]/35">
+	              Local SSH watchers; training runs in remote tmux <span className="font-mono">arq</span>.
+	            </p>
+	            {renderSessionList(runSessions, "No run supervisors active.")}
+	          </div>
+	        </section>
 
-        {/* ================= SECTION 3 · OTHER SESSIONS ================= */}
-        <section className="mt-16 w-full max-w-2xl">
-          <div className="mb-5 flex items-end justify-between gap-3 border-b border-white/15 pb-3">
-            <div className="flex items-center gap-3">
-              <span className="h-7 w-1 rounded-full bg-white/40" />
-              <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.28em] text-[#faf9f6]/70">
-                  Other tmux
-                </h2>
-                <p className="text-[11px] text-[#faf9f6]/40">
-                  Any sessions not tied to idea generation or GPU runs.
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={refreshSessions}
-              className="shrink-0 text-xs uppercase tracking-[0.2em] text-[#faf9f6]/50 transition hover:text-[#faf9f6]/80"
-            >
-              Refresh
-            </button>
-          </div>
+	        {/* ================= SECTION 3 · OTHER SESSIONS ================= */}
+	        <section className="mt-16 w-full max-w-4xl">
+	          <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
+	            <div className="flex min-w-0 items-center gap-2.5">
+	              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.04] text-[#faf9f6]/60">
+	                <Terminal className="h-4 w-4" aria-hidden />
+	              </span>
+	              <div>
+	                <h2 className="text-sm font-semibold uppercase tracking-normal text-[#faf9f6]/75">
+	                  Other tmux
+	                </h2>
+	                <p className="text-[11px] text-[#faf9f6]/40">
+	                  Sessions outside the main loop.
+	                </p>
+	              </div>
+	            </div>
+	            <button
+	              type="button"
+	              onClick={refreshSessions}
+	              aria-label="Refresh tmux sessions"
+	              title="Refresh tmux sessions"
+	              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.03] text-[#faf9f6]/55 transition hover:border-white/25 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20"
+	            >
+	              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+	            </button>
+	          </div>
 
           {sessionMsg && <p className="mb-2 text-xs text-red-300">{sessionMsg}</p>}
           {sessionLoadError && (
@@ -2765,25 +2945,26 @@ export default function LaunchCodexPage() {
         {/* ===== SECTION 4 · RECORD TIMELINE (lead of the results view) ===== */}
         <ResearchRecords data={recordsApi} />
 
-        {/* ===== SECTION 5 · ALL EXPERIMENTS (merged: ran + closed, filtered) ===== */}
-        <section className="mt-12 w-full max-w-2xl">
-          <div className="mb-4 flex items-end justify-between gap-3 border-b border-emerald-300/20 pb-3">
-            <div className="flex items-center gap-3">
-              <span className="h-7 w-1 rounded-full bg-emerald-300/70" />
-              <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.28em] text-emerald-200">
-                  All experiments
-                </h2>
-                <p className="text-[11px] text-[#faf9f6]/40">
-                  Every A/B and closed idea, newest first. Ran ideas show the full
-                  curve; killed-on-paper ones are one-liners.
-                </p>
-              </div>
-            </div>
-            <span className="shrink-0 text-xs uppercase tracking-[0.2em] text-emerald-300/60">
-              {allCount}
-            </span>
-          </div>
+	        {/* ===== SECTION 5 · ALL EXPERIMENTS (merged: ran + closed, filtered) ===== */}
+	        <section className="mt-12 w-full max-w-4xl">
+	          <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
+	            <div className="flex min-w-0 items-center gap-2.5">
+	              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-emerald-300/20 bg-emerald-300/[0.06] text-emerald-200">
+	                <FileText className="h-4 w-4" aria-hidden />
+	              </span>
+	              <div>
+	                <h2 className="text-sm font-semibold uppercase tracking-normal text-emerald-100">
+	                  All experiments
+	                </h2>
+	                <p className="text-[11px] text-[#faf9f6]/40">
+	                  Ran and closed ideas, newest first.
+	                </p>
+	              </div>
+	            </div>
+	            <span className="shrink-0 rounded-md border border-emerald-300/20 bg-emerald-300/[0.06] px-2 py-1 font-mono text-xs text-emerald-200/75">
+	              {allCount}
+	            </span>
+	          </div>
 
           {/* Verdict filter chips */}
           <div className="mb-4 flex flex-wrap gap-2">
@@ -2797,12 +2978,12 @@ export default function LaunchCodexPage() {
                     setExpFilter(chip.id);
                     setShowAllFinished(false);
                   }}
-                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition focus:outline-none ${
-                    active
-                      ? "border-emerald-300/40 bg-emerald-300/15 text-emerald-100"
-                      : "border-white/10 bg-white/[0.02] text-[#faf9f6]/45 hover:border-white/25 hover:text-[#faf9f6]/75"
-                  }`}
-                >
+	                  className={`rounded-md border px-2.5 py-1 text-[11px] font-medium transition focus:outline-none ${
+	                    active
+	                      ? "border-emerald-300/35 bg-emerald-300/[0.12] text-emerald-100"
+	                      : "border-white/10 bg-white/[0.02] text-[#faf9f6]/45 hover:border-white/25 hover:text-[#faf9f6]/75"
+	                  }`}
+	                >
                   {chip.label}
                   <span className="ml-1.5 font-mono tabular-nums opacity-60">{chip.n}</span>
                 </button>
