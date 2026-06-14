@@ -1,8 +1,13 @@
 import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
+
+const TMUX_BIN = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux'].find(
+  (p) => existsSync(p)
+) ?? 'tmux';
 
 export const RESEARCH_REPO_DIR = '/Users/vukrosic/my-life/llm-research-kit-scaling';
 
@@ -91,6 +96,19 @@ function buildFallbackCommand(primaryCmd: string, fallbackCmd: string): string {
   return `${FALLBACK_SCRIPT} '${primaryCmd}' '${fallbackCmd}'`;
 }
 
+async function tagSession(session: string, label: string, agentId: AgentId) {
+  try {
+    await execFileAsync(TMUX_BIN, ['set-option', '-t', session, '@agent_label', label], {
+      timeout: 10_000,
+    });
+    await execFileAsync(TMUX_BIN, ['set-option', '-t', session, '@agent_id', agentId], {
+      timeout: 10_000,
+    });
+  } catch {
+    /* best effort — the UI also falls back to tmux command/title inference */
+  }
+}
+
 export const DEFAULT_AGENT: AgentId = 'minimax';
 
 export function resolveAgent(agent?: string): AgentDef {
@@ -174,6 +192,8 @@ export async function launchCodexWithText(
       maxBuffer: 10 * 1024 * 1024,
       timeout: 60_000,
     });
+
+    await tagSession(session, def.label, def.id);
 
     return { success: true, session, agent: def.id, stdout: stdout.trim() };
   } catch (error) {

@@ -1,5 +1,6 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
+import { openSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
@@ -58,6 +59,26 @@ async function killRunner(): Promise<void> {
   }
 }
 
+// Deterministic-drainer path: fire ONE queue-daemon.sh tick, detached. The
+// script is idempotent and self-locking (flock), so spawning it on every poll
+// is safe — overlapping ticks exit immediately and a live `arq` queue is never
+// relaunched. Output tails to /tmp/queue-daemon.log. No LLM in this path.
+function runDaemonTick(): boolean {
+  const script = join(getActiveRepoDir(), 'autoresearch', 'bin', 'queue-daemon.sh');
+  try {
+    const out = openSync('/tmp/queue-daemon.log', 'a');
+    const child = spawn('bash', [script, '--once'], {
+      cwd: getActiveRepoDir(),
+      detached: true,
+      stdio: ['ignore', out, out],
+    });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Build the runner-pass instruction: tell the agent to read runner.md + PIPELINE
 // and run ONE pass, with the LIVE box pulled from remote-box.json (so a new Vast
 // instance is picked up just by editing that file). The agent reads the full
@@ -108,7 +129,12 @@ export async function POST(req: Request) {
   const current = await getAutorunAgent();
   let launched = false;
   let alive = await runnerAlive();
-  if (current && !alive && (await needsRunCount()) > 0) {
+  if (current === 'daemon') {
+    // Deterministic drainer — no persistent agent. Fire one self-locking tick;
+    // it finalizes any finished runs and launches the next queue itself.
+    launched = runDaemonTick();
+    alive = launched;
+  } else if (current && !alive && (await needsRunCount()) > 0) {
     const result = await launchCodexWithText(
       await runnerPrompt(),
       'lab-autorun',

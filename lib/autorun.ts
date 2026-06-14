@@ -8,7 +8,10 @@ import { getActiveRepoDir } from './projects';
 // hook (run-done) and the UI agree across requests and server restarts.
 const flagPath = () => join(getActiveRepoDir(), 'autoresearch', 'autorun.flag');
 
-const KNOWN_AGENTS = new Set(['minimax', 'codex']);
+// 'minimax' | 'codex' launch the AI runner agent (prompts/runner.md). 'daemon'
+// selects the deterministic drainer (autoresearch/bin/queue-daemon.sh) — no LLM
+// in the GPU hot loop. Same flag/poll plumbing, so the UI can A/B the two.
+const KNOWN_AGENTS = new Set(['minimax', 'codex', 'daemon']);
 
 // Returns the agent id to use for auto-launched runs, or null when autorun is
 // off. Falls back to "minimax" if the file exists but holds an unknown value.

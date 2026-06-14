@@ -24,6 +24,8 @@ import { MarkdownPanel } from "@/components/markdown-panel";
 import AnalyticsView from "@/components/analytics-view";
 import DocumentationView from "@/components/documentation-view";
 import ResearchRecords, { type RecordsData } from "@/components/research-records";
+import HealthBar from "@/components/health-bar";
+import MonitorPanel from "@/components/monitor-panel";
 
 // Which top-level view the sidebar is showing. "home" is the main dashboard
 // (ideas + GPU + finished); "analytics" is the stage-timing view;
@@ -35,6 +37,8 @@ type Session = {
   name: string;
   created: number;
   windows: number;
+  agentLabel: string | null;
+  agentCommand: string | null;
 };
 
 type Result = {
@@ -89,6 +93,9 @@ const GENERATE_SESSION_PREFIX = "lab-generate";
 const AGENT_OPTIONS: { id: string; label: string }[] = [
   { id: "minimax", label: "MiniMax (cmf)" },
   { id: "codex", label: "Codex" },
+  // Deterministic GPU drainer (queue-daemon.sh) — no LLM in the run loop. The
+  // gate workers safely fall back to MiniMax; only autorun routes to the daemon.
+  { id: "daemon", label: "Daemon (no-AI GPU)" },
 ];
 
 // Human-readable labels + colour for each on-disk pipeline status. The raw
@@ -186,6 +193,60 @@ const FINISHED_STATUSES = new Set([
 const isTimedStatus = (status: string) =>
   status !== "needs-taste" && !FINISHED_STATUSES.has(status);
 
+type SessionTagKind = "codex" | "minimax" | "claude" | "shell" | "other";
+
+function sessionTagMeta(session: Session): {
+  label: string;
+  title: string;
+  tone: string;
+  kind: SessionTagKind;
+} | null {
+  const explicit = session.agentLabel?.trim();
+  const command = session.agentCommand?.trim() ?? "";
+  const probe = `${explicit ?? ""} ${command}`.trim().toLowerCase();
+  if (!probe) return null;
+
+  const title = command || explicit || session.name;
+  if (probe.includes("codex")) {
+    return {
+      label: "Codex",
+      title,
+      tone: "border-cyan-300/20 bg-cyan-300/[0.06] text-cyan-100/80",
+      kind: "codex",
+    };
+  }
+  if (probe.includes("minimax") || probe.includes("claude-minimax-free")) {
+    return {
+      label: "MiniMax (cmf)",
+      title,
+      tone: "border-amber-300/20 bg-amber-300/[0.06] text-amber-100/80",
+      kind: "minimax",
+    };
+  }
+  if (probe.includes("claude")) {
+    return {
+      label: explicit || "Claude Code",
+      title,
+      tone: "border-violet-300/20 bg-violet-300/[0.06] text-violet-100/80",
+      kind: "claude",
+    };
+  }
+  if (probe.includes("bash") || probe.includes("zsh") || probe.includes("sh")) {
+    return {
+      label: "Shell",
+      title,
+      tone: "border-white/10 bg-white/[0.03] text-[#faf9f6]/55",
+      kind: "shell",
+    };
+  }
+  return {
+    label: explicit || command || session.name,
+    title,
+    tone: "border-white/10 bg-white/[0.03] text-[#faf9f6]/55",
+    kind: "other",
+  };
+}
+
 export default function LaunchCodexPage() {
   const [view, setView] = useState<View>("home");
   const [agent, setAgent] = useState<string>("minimax");
@@ -262,6 +323,8 @@ export default function LaunchCodexPage() {
   );
   // Settings popover (uncommon controls: agent, headless, prompt files).
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  // Wraps the gear button + popover so a click anywhere outside closes it.
+  const settingsRef = useRef<HTMLDivElement>(null);
   const [expandedIdeaGroups, setExpandedIdeaGroups] = useState<Set<string>>(
     () => new Set()
   );
@@ -657,6 +720,25 @@ export default function LaunchCodexPage() {
     };
   }, []);
 
+  // Close the settings popover on any click/tap outside it (and on Escape).
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSettingsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [settingsOpen]);
+
   // 1s ticker so "updated Ns ago" labels count up between polls. Pauses with
   // the tab hidden. Cheap: just bumps a timestamp.
   useEffect(() => {
@@ -800,8 +882,11 @@ export default function LaunchCodexPage() {
 
   // Flip autorun on/off. Enabling also kicks the first run server-side (and we
   // pass the selected agent so the whole chain uses it).
-  const handleToggleAutorun = async () => {
-    const next = !autorunOn;
+  // --- Auto subsystems -------------------------------------------------------
+  // Each apply* sets ONE subsystem to an explicit enabled value (not a toggle)
+  // and returns the server-confirmed state, so both the individual buttons and
+  // the master "Autoresearch" switch can drive them.
+  const applyAutorun = async (next: boolean): Promise<boolean | null> => {
     setAutorunBusy(true);
     try {
       const response = await fetch("/api/autorun/", {
@@ -812,25 +897,17 @@ export default function LaunchCodexPage() {
       const data = await response.json().catch(() => ({}));
       if (response.ok && typeof data.enabled === "boolean") {
         setAutorunOn(data.enabled);
-        setRunMessage(
-          data.enabled
-            ? "Autorun on — finished runs auto-launch the next queued idea."
-            : "Autorun off."
-        );
+        return data.enabled;
       }
     } catch {
       setRunMessage("Failed to toggle autorun");
     } finally {
       setAutorunBusy(false);
-      refreshSessions();
-      refreshIdeas();
     }
+    return null;
   };
 
-  // Flip autopilot on/off. Enabling drives the gate pipeline AND turns on autorun
-  // so the GPU queue drains too — one switch runs the whole loop end to end.
-  const handleToggleAutopilot = async () => {
-    const next = !autopilotOn;
+  const applyAutopilot = async (next: boolean): Promise<boolean | null> => {
     setAutopilotBusy(true);
     try {
       const response = await fetch("/api/orchestrate/", {
@@ -841,33 +918,85 @@ export default function LaunchCodexPage() {
       const data = await response.json().catch(() => ({}));
       if (response.ok && typeof data.enabled === "boolean") {
         setAutopilotOn(data.enabled);
-        setRunMessage(
-          data.enabled
-            ? "Autopilot on — pipeline self-runs: gates advance, ideas refill, GPU drains."
-            : "Autopilot off."
-        );
-        // Keep the GPU side in lockstep: enabling autopilot enables autorun,
-        // disabling leaves autorun as-is (the user can stop the GPU separately).
-        if (data.enabled && !autorunOn) {
-          await fetch("/api/autorun/", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: true, agent, headless }),
-          })
-            .then((r) => (r.ok ? r.json() : null))
-            .then((d) => {
-              if (d && typeof d.enabled === "boolean") setAutorunOn(d.enabled);
-            })
-            .catch(() => {});
-        }
+        return data.enabled;
       }
     } catch {
       setRunMessage("Failed to toggle autopilot");
     } finally {
       setAutopilotBusy(false);
-      refreshSessions();
-      refreshIdeas();
     }
+    return null;
+  };
+
+  const applyAutoImplement = async (next: boolean): Promise<boolean | null> => {
+    setAutoImplementBusy(true);
+    setAutoImplementOn(next); // optimistic
+    try {
+      const response = await fetch("/api/auto-implement/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next, agent }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && typeof data.enabled === "boolean") {
+        setAutoImplementOn(data.enabled);
+        return data.enabled;
+      }
+    } catch {
+      setAutoImplementOn(!next); // revert on failure
+    } finally {
+      setAutoImplementBusy(false);
+    }
+    return null;
+  };
+
+  const handleToggleAutorun = async () => {
+    const enabled = await applyAutorun(!autorunOn);
+    if (enabled !== null) {
+      setRunMessage(
+        enabled
+          ? "Autorun on — finished runs auto-launch the next queued idea."
+          : "Autorun off."
+      );
+    }
+    refreshSessions();
+    refreshIdeas();
+  };
+
+  // Flip autopilot on/off. Enabling drives the gate pipeline AND turns on autorun
+  // so the GPU queue drains too — one switch runs the whole loop end to end.
+  const handleToggleAutopilot = async () => {
+    const enabled = await applyAutopilot(!autopilotOn);
+    if (enabled !== null) {
+      setRunMessage(
+        enabled
+          ? "Autopilot on — pipeline self-runs: gates advance, ideas refill, GPU drains."
+          : "Autopilot off."
+      );
+      // Keep the GPU side in lockstep: enabling autopilot enables autorun.
+      if (enabled && !autorunOn) await applyAutorun(true);
+    }
+    refreshSessions();
+    refreshIdeas();
+  };
+
+  // Master switch. "Autoresearch" = the whole loop (ideas → implement → gates →
+  // GPU). Flips all three subsystems together; when on, the individual toggles
+  // are hidden in the UI and only this one shows.
+  const handleToggleAutoresearch = async () => {
+    const next = !(autopilotOn && autorunOn && autoImplementOn);
+    await Promise.all([
+      applyAutopilot(next),
+      applyAutorun(next),
+      applyAutoImplement(next),
+    ]);
+    setRunMessage(
+      next
+        ? "Autoresearch on — the full loop self-runs end to end."
+        : "Autoresearch off — control each part individually."
+    );
+    refreshSessions();
+    refreshIdeas();
   };
 
   // Switch the active project. Every API route resolves the active repo per
@@ -1055,27 +1184,14 @@ export default function LaunchCodexPage() {
   // Flip auto-implement on/off. The toggle response also carries the running
   // state back; enabling drives an immediate tick server-side.
   const handleToggleAutoImplement = async () => {
-    const next = !autoImplementOn;
-    setAutoImplementBusy(true);
-    setAutoImplementOn(next); // optimistic
-    try {
-      const response = await fetch("/api/auto-implement/", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next, agent }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (response.ok && typeof data.enabled === "boolean") {
-        setAutoImplementOn(data.enabled);
-      }
-    } catch {
-      setAutoImplementOn(!next); // revert on failure
-    } finally {
-      setAutoImplementBusy(false);
-      refreshSessions();
-      refreshIdeas();
-    }
+    await applyAutoImplement(!autoImplementOn);
+    refreshSessions();
+    refreshIdeas();
   };
+
+  // Autoresearch is "on" only when every subsystem is on; busy if any is mid-flip.
+  const autoresearchOn = autopilotOn && autorunOn && autoImplementOn;
+  const autoresearchBusy = autopilotBusy || autorunBusy || autoImplementBusy;
 
   const handleRunNext = async () => {
     setIsRunningNext(true);
@@ -1513,10 +1629,29 @@ export default function LaunchCodexPage() {
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate font-mono text-sm text-[#faf9f6]">
                       {session.name}
                     </p>
+                    {(() => {
+                      const tag = sessionTagMeta(session);
+                      if (!tag) return null;
+                      return (
+                        <span
+                          title={tag.title}
+                          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] font-medium ${tag.tone}`}
+                        >
+                          {tag.kind === "codex" ? (
+                            <Cpu className="h-3 w-3" aria-hidden />
+                          ) : tag.kind === "minimax" ? (
+                            <Sparkles className="h-3 w-3" aria-hidden />
+                          ) : (
+                            <Terminal className="h-3 w-3" aria-hidden />
+                          )}
+                          <span className="max-w-[11rem] truncate">{tag.label}</span>
+                        </span>
+                      );
+                    })()}
                     <span className="shrink-0 rounded border border-sky-300/20 bg-sky-300/[0.06] px-1.5 py-0.5 text-[9px] font-medium text-sky-200/75">
                       {location}
                     </span>
@@ -1682,7 +1817,11 @@ export default function LaunchCodexPage() {
   // One idea row — the title, status badge, action buttons, and (if the A/B
   // has finished) the verdict + numbers. Used by every grouped list so the
   // cards stay identical wherever they appear.
-  const renderIdeaCard = (idea: Idea, extra?: ReactNode) => {
+  const renderIdeaCard = (
+    idea: Idea,
+    extra?: ReactNode,
+    showResult: boolean = true
+  ) => {
     const implementSessionName = IMPLEMENT_SESSION_PREFIX + idea.id;
     const runSessionName = RUN_SESSION_PREFIX + idea.id;
     const liveImplement = liveSessions.has(implementSessionName);
@@ -1704,6 +1843,7 @@ export default function LaunchCodexPage() {
           <button
             type="button"
             onClick={() => setOpenFile({ path: idea.path, title: idea.title })}
+            title={`Open ${idea.title}`}
             className="min-w-0 flex-1 text-left transition hover:opacity-80 focus:outline-none"
           >
             <p className="truncate text-sm font-semibold text-[#faf9f6]">
@@ -1759,6 +1899,7 @@ export default function LaunchCodexPage() {
                       title: `${idea.title} — evidence`,
                     })
                   }
+                  title={`Open evidence for ${idea.title}`}
                   className="inline-flex h-7 items-center gap-1.5 rounded-md border border-fuchsia-300/25 bg-fuchsia-300/[0.07] px-2 text-[11px] font-medium text-fuchsia-200 transition hover:border-fuchsia-300/50 hover:bg-fuchsia-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/35"
                 >
                   <FileText className="h-3.5 w-3.5" aria-hidden />
@@ -1778,6 +1919,11 @@ export default function LaunchCodexPage() {
                     )
                   }
                   disabled={busy}
+                  title={
+                    idea.status === "running"
+                      ? "Requeue this stuck GPU run"
+                      : "Reset this stuck idea back to Proposed"
+                  }
                   className="inline-flex h-7 items-center gap-1.5 rounded-md border border-orange-400/25 bg-orange-400/[0.07] px-2 text-[11px] font-medium text-orange-300 transition hover:border-orange-400/50 hover:bg-orange-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <RefreshCw className="h-3.5 w-3.5" aria-hidden />
@@ -1789,6 +1935,7 @@ export default function LaunchCodexPage() {
                   type="button"
                   onClick={() => handleAttach(liveSessionName)}
                   disabled={attaching === liveSessionName}
+                  title={`Attach to ${liveSessionName}`}
                   className="inline-flex h-7 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {attaching === liveSessionName ? (
@@ -1807,6 +1954,11 @@ export default function LaunchCodexPage() {
                   type="button"
                   onClick={() => handleImplement(idea.id)}
                   disabled={busy}
+                  title={
+                    isStuck
+                      ? "Retry this idea with a fresh implementation pass"
+                      : "Implement this idea now"
+                  }
                   className="inline-flex h-7 items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-2 text-[11px] font-medium text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {busy ? (
@@ -1824,7 +1976,7 @@ export default function LaunchCodexPage() {
             </div>
           </div>
         </div>
-        {idea.result && renderResult(idea.result, !FINISHED_STATUSES.has(idea.status))}
+        {showResult && idea.result && renderResult(idea.result, !FINISHED_STATUSES.has(idea.status))}
         {extra}
       </li>
     );
@@ -2047,16 +2199,26 @@ export default function LaunchCodexPage() {
       ) : view === "documentation" ? (
         <DocumentationView onHome={() => setView("home")} />
       ) : (
-      <main className="min-h-screen flex-1 bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
-        <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10">
+      <main className="min-h-screen flex-1 bg-[#1f1e1d] text-[#faf9f6]">
+        {/* System health bar — sticky at the top of the cockpit. At-a-glance
+            loop status (workers, dead panes, idea pool, throughput, GPU, quota)
+            plus the master Autoresearch toggle. Read-only poll; the toggle is
+            the page's own handler so state stays single-sourced. */}
+        <HealthBar
+          autoresearchOn={autoresearchOn}
+          busy={autoresearchBusy}
+          onToggle={handleToggleAutoresearch}
+        />
+        <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10 pt-6">
         {/* Uncommon controls (agent, headless, prompt files) live behind this
             gear so the main view stays focused on ideas + the queue. */}
-        <div className="relative w-full max-w-2xl">
-          <div className="flex justify-end">
+        <div className="flex w-full max-w-2xl justify-end">
+          <div className="relative" ref={settingsRef}>
             <button
               type="button"
               onClick={() => setSettingsOpen((v) => !v)}
               aria-expanded={settingsOpen}
+              title="Open settings"
               className={`inline-flex h-9 items-center gap-2 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-white/20 ${
                 settingsOpen
                   ? "border-white/30 bg-white/[0.08] text-white"
@@ -2068,9 +2230,8 @@ export default function LaunchCodexPage() {
               <span className="h-1 w-1 rounded-full bg-[#faf9f6]/30" aria-hidden />
               <span>{AGENT_OPTIONS.find((o) => o.id === agent)?.label ?? agent}</span>
             </button>
-          </div>
 
-          {settingsOpen && (
+            {settingsOpen && (
             <div className="absolute right-0 z-20 mt-2 w-72 rounded-xl border border-white/12 bg-[#262524] p-4 text-left shadow-xl shadow-black/40">
               <div className="mb-3">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/45">
@@ -2121,6 +2282,7 @@ export default function LaunchCodexPage() {
                         setOpenFile({ path: p.path, title: p.title });
                         setSettingsOpen(false);
                       }}
+                      title={`Open ${p.title}`}
                       className="flex items-center justify-between rounded-md px-2 py-1 text-left text-[#faf9f6]/70 transition hover:bg-white/[0.06] hover:text-white"
                     >
                       <span>{p.label}</span>
@@ -2129,8 +2291,52 @@ export default function LaunchCodexPage() {
                   ))}
                 </div>
               </div>
+
+              {/* MiniMax quota — only shown when the key is configured and the
+                  API answered (ok). Percents are how much is LEFT to use. */}
+              {minimaxUsage?.ok && (
+                <div className="mt-4 border-t border-white/10 pt-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
+                    MiniMax tokens left
+                  </span>
+                  <div className="mt-2 space-y-1.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#faf9f6]/55">5-hour window</span>
+                      <span
+                        className={`font-semibold ${
+                          minimaxUsage.exhausted ? "text-rose-300" : "text-[#faf9f6]/80"
+                        }`}
+                      >
+                        {minimaxUsage.intervalPercent}% left
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[#faf9f6]/55">This week</span>
+                      <span className="font-semibold text-[#faf9f6]/80">
+                        {minimaxUsage.weeklyPercent}% left
+                      </span>
+                    </div>
+                    {minimaxUsage.exhausted && (
+                      <p className="pt-1 text-[11px] text-rose-300/80">
+                        Out of tokens — agents fall back to Codex
+                        {minimaxUsage.intervalResetAt != null
+                          ? (() => {
+                              const m = Math.max(
+                                0,
+                                Math.round((minimaxUsage.intervalResetAt - now) / 60000)
+                              );
+                              return ` · resets in ${m < 1 ? "<1" : m}m`;
+                            })()
+                          : ""}
+                        .
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
+          </div>
         </div>
 
         {/* ================= SECTION 1 · IDEAS ================= */}
@@ -2150,6 +2356,9 @@ export default function LaunchCodexPage() {
               </div>
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
+              {/* Hidden while Autoresearch (master) is on — it covers
+                  auto-implement; shown only for per-part control. */}
+              {!autoresearchOn && (
               <button
                 type="button"
                 onClick={handleToggleAutoImplement}
@@ -2172,6 +2381,7 @@ export default function LaunchCodexPage() {
                     ? "Auto on"
                     : "Auto off"}
               </button>
+              )}
               <button
                 type="button"
                 onClick={refreshIdeas}
@@ -2187,14 +2397,14 @@ export default function LaunchCodexPage() {
           {/* Generate controls + prompt edit links */}
           <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <form onSubmit={handleGenerate} className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <label className="inline-flex h-9 items-center overflow-hidden rounded-md border border-white/10 bg-white/[0.03] text-xs text-[#faf9f6]/60">
-                <span className="px-2.5 font-medium">Count</span>
+              <div className="inline-flex h-9 items-center overflow-hidden rounded-md border border-white/10 bg-white/[0.03] text-xs text-[#faf9f6]/60">
                 <button
                   type="button"
                   onClick={() => setIdeaCount((n) => Math.max(1, n - 1))}
                   disabled={ideaCount <= 1 || isGenerating}
                   aria-label="Decrease idea count"
-                  className="flex h-full w-8 items-center justify-center border-l border-white/10 text-[#faf9f6]/45 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+                  title={ideaCount <= 1 ? "Minimum count" : "Decrease idea count"}
+                  className="flex h-full w-8 items-center justify-center text-[#faf9f6]/45 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
                 >
                   <Minus className="h-3.5 w-3.5" aria-hidden />
                 </button>
@@ -2207,7 +2417,7 @@ export default function LaunchCodexPage() {
                     const n = Math.round(Number(e.target.value));
                     setIdeaCount(Number.isFinite(n) ? Math.max(1, Math.min(20, n)) : 1);
                   }}
-                  className="h-full w-11 border-x border-white/10 bg-[#1f1e1d] px-1 text-center text-sm font-semibold text-amber-100 [appearance:textfield] focus:outline-none focus:ring-2 focus:ring-amber-300/35"
+                  className="h-full w-11 border-x border-white/10 bg-[#1f1e1d] px-1 text-center text-sm font-semibold text-amber-100 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none focus:outline-none focus:ring-2 focus:ring-amber-300/35"
                   aria-label="Number of ideas to generate"
                 />
                 <button
@@ -2215,14 +2425,16 @@ export default function LaunchCodexPage() {
                   onClick={() => setIdeaCount((n) => Math.min(20, n + 1))}
                   disabled={ideaCount >= 20 || isGenerating}
                   aria-label="Increase idea count"
+                  title={ideaCount >= 20 ? "Maximum count" : "Increase idea count"}
                   className="flex h-full w-8 items-center justify-center text-[#faf9f6]/45 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
                 >
                   <Plus className="h-3.5 w-3.5" aria-hidden />
                 </button>
-              </label>
+              </div>
               <button
                 type="submit"
                 disabled={isGenerating}
+                title={`Generate ${ideaCount} idea${ideaCount === 1 ? "" : "s"}`}
                 className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-300/25 bg-amber-300/[0.08] px-3 text-xs font-semibold text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-300/[0.14] hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-300/35 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isGenerating ? (
@@ -2263,6 +2475,7 @@ export default function LaunchCodexPage() {
                       type="button"
                       onClick={() => toggleIdeaGroup(group.key)}
                       aria-expanded={expanded}
+                      title={expanded ? "Collapse idea group" : "Expand idea group"}
                       className="mb-2 flex w-full items-center justify-between gap-3 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-amber-300/20"
                     >
                       <span
@@ -2289,6 +2502,7 @@ export default function LaunchCodexPage() {
                       <button
                         type="button"
                         onClick={() => toggleIdeaGroup(group.key)}
+                        title="Show the rest of this idea group"
                         className="mt-2 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-amber-300/20"
                       >
                         Show {hiddenCount} more
@@ -2346,119 +2560,118 @@ export default function LaunchCodexPage() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
-              {/* MiniMax quota badge. Red when the 5-hour window is exhausted —
-                  in that state the launcher auto-falls-back to Codex, and we
-                  count down to when MiniMax becomes usable again. */}
-              {minimaxUsage &&
-                (minimaxUsage.ok ? (
-                  (() => {
-                    const resetMin =
-                      minimaxUsage.intervalResetAt != null
-                        ? Math.max(
-                            0,
-                            Math.round((minimaxUsage.intervalResetAt - now) / 60000)
-                          )
-                        : null;
-                    return (
-	                      <span
-	                        title={`MiniMax Token Plan — 5h window: ${minimaxUsage.intervalPercent}% left, weekly: ${minimaxUsage.weeklyPercent}% left.${
-	                          minimaxUsage.exhausted
-	                            ? " Window exhausted → agents fall back to Codex until it resets."
-	                            : ""
-	                        }`}
-	                        className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium ${
-	                          minimaxUsage.exhausted
-	                            ? "border-rose-400/50 bg-rose-400/15 text-rose-200"
-	                            : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60"
-	                        }`}
-	                      >
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${
-                            minimaxUsage.exhausted ? "bg-rose-400" : "bg-emerald-400"
-                          }`}
-                        />
-                        {minimaxUsage.exhausted
-                          ? `MiniMax out${
-                              resetMin != null
-                                ? ` · ${resetMin < 1 ? "<1" : resetMin}m`
-                                : ""
-                            } → Codex`
-                          : `MiniMax ${minimaxUsage.intervalPercent}%`}
-                      </span>
-                    );
-                  })()
+              {/* Master switch. When Autoresearch is ON the whole loop self-runs
+                  (ideas → implement → gates → GPU) and the individual auto-toggles
+                  are hidden; when OFF they appear so each part can be run alone. */}
+              <button
+                type="button"
+                onClick={handleToggleAutoresearch}
+                disabled={autoresearchBusy}
+                title={
+                  autoresearchOn
+                    ? "Autoresearch is ON — idea generation, auto-implement, the gate pipeline, and GPU runs all self-run. Click to stop everything and control each part individually."
+                    : "Autoresearch is OFF. Click to run the ENTIRE loop automatically — idea generation, implement, gates, and GPU runs."
+                }
+                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  autoresearchOn
+                    ? "border-violet-400/60 bg-violet-400/20 text-violet-100 hover:bg-violet-400/30 focus:ring-violet-400/40"
+                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+                }`}
+              >
+                {autoresearchBusy ? (
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
                 ) : (
-	                  <span
-	                    title={`MiniMax quota unavailable: ${minimaxUsage.error ?? "unknown"}`}
-	                    className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.02] px-2.5 text-xs font-medium text-[#faf9f6]/35"
-	                  >
-	                    <span className="h-1.5 w-1.5 rounded-full bg-[#faf9f6]/30" />
-	                    MiniMax ?
-                  </span>
-                ))}
-              <button
-                type="button"
-                onClick={handleToggleAutopilot}
-                disabled={autopilotBusy}
-	                title={
-	                  autopilotOn
-	                    ? `Autopilot is ON — the whole pipeline self-runs: stuck gates advance, ideas refill below ${autopilotInfo?.floor ?? 5} (cap ${autopilotInfo?.ceiling ?? 20}), and the GPU drains. Click to stop.`
-	                    : "Autopilot is OFF. Click to run the entire pipeline automatically — reviews, fixes, idea generation, and GPU runs."
-	                }
-	                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
-	                  autopilotOn
-	                    ? "border-violet-400/50 bg-violet-400/15 text-violet-200 hover:bg-violet-400/25 focus:ring-violet-400/40"
-	                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
-	                }`}
-	              >
-	                <Power className={`h-3.5 w-3.5 ${autopilotOn ? "fill-violet-300/25" : ""}`} aria-hidden />
-	                {autopilotBusy
-	                  ? "Saving"
-	                  : autopilotOn
-	                    ? `Pilot on${autopilotInfo ? ` · ${autopilotInfo.inFlight}` : ""}`
-	                    : "Pilot off"}
-	              </button>
-              <button
-                type="button"
-                onClick={handleToggleAutorun}
-                disabled={autorunBusy}
-	                title={
-	                  autorunOn
-	                    ? "Autorun is ON — each finished run auto-launches the next queued idea. Click to stop."
-	                    : "Autorun is OFF. Click to march through the queue automatically (one run at a time)."
-	                }
-	                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
-	                  autorunOn
-	                    ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 hover:bg-emerald-400/25 focus:ring-emerald-400/40"
-	                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
-	                }`}
-	              >
-	                {autorunBusy ? (
-	                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-	                ) : (
-	                  <Play className={`h-3.5 w-3.5 ${autorunOn ? "fill-emerald-300/25" : ""}`} aria-hidden />
-	                )}
-	                {autorunBusy ? "Saving" : autorunOn ? "Autorun" : "Manual"}
-	              </button>
+                  <Sparkles
+                    className={`h-3.5 w-3.5 ${autoresearchOn ? "fill-violet-200/30" : ""}`}
+                    aria-hidden
+                  />
+                )}
+                {autoresearchBusy
+                  ? "Saving"
+                  : autoresearchOn
+                    ? `Autoresearch on${autopilotInfo ? ` · ${autopilotInfo.inFlight}` : ""}`
+                    : "Autoresearch off"}
+              </button>
+
+              {/* Individual parts — only shown when the master is OFF. */}
+              {!autoresearchOn && (
+                <button
+                  type="button"
+                  onClick={handleToggleAutopilot}
+                  disabled={autopilotBusy}
+                  title={
+                    autopilotOn
+                      ? `Autopilot is ON — stuck gates advance, ideas refill below ${autopilotInfo?.floor ?? 5} (cap ${autopilotInfo?.ceiling ?? 20}), and the GPU drains. Click to stop.`
+                      : "Autopilot is OFF. Click to auto-advance gates, refill ideas, and drain the GPU."
+                  }
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    autopilotOn
+                      ? "border-violet-400/50 bg-violet-400/15 text-violet-200 hover:bg-violet-400/25 focus:ring-violet-400/40"
+                      : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+                  }`}
+                >
+                  <Power
+                    className={`h-3.5 w-3.5 ${autopilotOn ? "fill-violet-300/25" : ""}`}
+                    aria-hidden
+                  />
+                  {autopilotBusy
+                    ? "Saving"
+                    : autopilotOn
+                      ? `Pilot on${autopilotInfo ? ` · ${autopilotInfo.inFlight}` : ""}`
+                      : "Pilot off"}
+                </button>
+              )}
+              {!autoresearchOn && (
+                <button
+                  type="button"
+                  onClick={handleToggleAutorun}
+                  disabled={autorunBusy}
+                  title={
+                    autorunOn
+                      ? "Autorun is ON — each finished run auto-launches the next queued idea. Click to stop."
+                      : "Autorun is OFF. Click to march through the queue automatically (one run at a time)."
+                  }
+                  className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                    autorunOn
+                      ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 hover:bg-emerald-400/25 focus:ring-emerald-400/40"
+                      : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+                  }`}
+                >
+                  {autorunBusy ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Play
+                      className={`h-3.5 w-3.5 ${autorunOn ? "fill-emerald-300/25" : ""}`}
+                      aria-hidden
+                    />
+                  )}
+                  {autorunBusy ? "Saving" : autorunOn ? "Autorun" : "Manual"}
+                </button>
+              )}
               {/* Manual single-run only makes sense when autorun is off — when
                   it's on, the lab-autorun runner agent drains the queue itself. */}
               {!autorunOn && (
-	                <button
-	                  type="button"
-	                  onClick={handleRunNext}
-	                  disabled={isRunningNext || gpuBusy || queuedIdeas.length === 0}
-	                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2.5 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
-	                >
-	                  {isRunningNext ? (
-	                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-	                  ) : (
-	                    <Play className="h-3.5 w-3.5" aria-hidden />
-	                  )}
-	                  {isRunningNext
-	                    ? "Launching"
-	                    : gpuBusy
-	                      ? "GPU busy"
-	                      : queuedIdeas.length === 0
+                <button
+                  type="button"
+                  onClick={handleRunNext}
+                  disabled={isRunningNext || gpuBusy || queuedIdeas.length === 0}
+                  title={
+                    queuedIdeas.length === 0
+                      ? "No queued ideas to run"
+                      : "Launch the next queued idea on the GPU"
+                  }
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2.5 text-xs font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isRunningNext ? (
+                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  ) : (
+                    <Play className="h-3.5 w-3.5" aria-hidden />
+                  )}
+                  {isRunningNext
+                    ? "Launching"
+                    : gpuBusy
+                      ? "GPU busy"
+                      : queuedIdeas.length === 0
                         ? "Queue empty"
                         : "Run next"}
                 </button>
@@ -2533,6 +2746,7 @@ export default function LaunchCodexPage() {
 	              type="button"
 	              onClick={() => setRunnerExtraOpen((v) => !v)}
 	              aria-expanded={runnerExtraOpen}
+	              title={runnerExtraOpen ? "Hide runner instructions" : "Open runner instructions"}
 	              className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
 	            >
 	              <span className="flex min-w-0 items-center gap-2.5">
@@ -2571,11 +2785,12 @@ export default function LaunchCodexPage() {
                     {runnerExtraMsg}
                   </span>
                 )}
-	                <button
-	                  type="button"
-	                  onClick={handleSaveRunnerExtra}
-	                  disabled={runnerExtraSaving}
-	                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-white/15 bg-white/[0.04] px-2 text-[11px] font-medium text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20 disabled:cursor-not-allowed disabled:opacity-50"
+                  <button
+                    type="button"
+                    onClick={handleSaveRunnerExtra}
+                    disabled={runnerExtraSaving}
+                    title="Save runner instructions"
+	                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-white/15 bg-white/[0.04] px-2 text-[11px] font-medium text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white focus:outline-none focus:ring-2 focus:ring-white/20 disabled:cursor-not-allowed disabled:opacity-50"
 	                >
 	                  {runnerExtraSaving && <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />}
 	                  {runnerExtraSaving ? "Saving" : "Save"}
@@ -2626,6 +2841,7 @@ export default function LaunchCodexPage() {
                         onClick={() =>
                           setOpenFile({ path: idea.path, title: idea.title })
                         }
+                        title={`Open ${idea.title}`}
                         className="min-w-0 flex-1 text-left transition hover:opacity-80 focus:outline-none"
                       >
                         <p className="truncate text-sm font-semibold text-[#faf9f6]">
@@ -2706,11 +2922,12 @@ export default function LaunchCodexPage() {
               </ul>
 
               {gpuQueue.length > compactGpuQueue.length && (
-                <button
-                  type="button"
-                  onClick={() => setGpuQueueExpanded((v) => !v)}
-                  className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
-                >
+	                <button
+	                  type="button"
+	                  onClick={() => setGpuQueueExpanded((v) => !v)}
+	                  title={gpuQueueExpanded ? "Collapse full queue" : "Show the full queue"}
+	                  className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-cyan-300/20"
+	                >
                   {gpuQueueExpanded
                     ? "Collapse full queue"
                     : `Show full queue (${gpuQueue.length})`}
@@ -2978,6 +3195,7 @@ export default function LaunchCodexPage() {
                     setExpFilter(chip.id);
                     setShowAllFinished(false);
                   }}
+                  title={`Show ${chip.label.toLowerCase()} experiments`}
 	                  className={`rounded-md border px-2.5 py-1 text-[11px] font-medium transition focus:outline-none ${
 	                    active
 	                      ? "border-emerald-300/35 bg-emerald-300/[0.12] text-emerald-100"
@@ -2998,7 +3216,7 @@ export default function LaunchCodexPage() {
           ) : (
             <>
               <ul className="space-y-2">
-                {ideaShown.map((idea) => renderIdeaCard(idea))}
+                {ideaShown.map((idea) => renderIdeaCard(idea, undefined, false))}
                 {closedShownExp.map((c, i) => {
                   const isReject = closedBucket(c.verdict) === "reject";
                   return (
@@ -3032,6 +3250,7 @@ export default function LaunchCodexPage() {
                 <button
                   type="button"
                   onClick={() => setShowAllFinished(true)}
+                  title="Show the rest of the finished experiments"
                   className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-emerald-300/20"
                 >
                   Show {expTotal - expTotalShown} more
@@ -3041,6 +3260,7 @@ export default function LaunchCodexPage() {
                 <button
                   type="button"
                   onClick={() => setShowAllFinished(false)}
+                  title="Collapse the finished experiments list"
                   className="mt-3 w-full text-xs uppercase tracking-[0.18em] text-[#faf9f6]/35 transition hover:text-[#faf9f6]/65"
                 >
                   Collapse
@@ -3058,6 +3278,9 @@ export default function LaunchCodexPage() {
         />
       </main>
       )}
+      {/* Watchdog agent dock — floating opener + right panel, fixed-positioned
+          so it rides above the cockpit regardless of the active view. */}
+      <MonitorPanel />
     </div>
   );
 }

@@ -12,25 +12,78 @@ type Session = {
   name: string;
   created: number;
   windows: number;
+  agentLabel: string | null;
+  agentCommand: string | null;
 };
+
+function inferSessionLabel(
+  agentLabel: string | null,
+  agentCommand: string | null,
+  paneTitle: string | null
+): string | null {
+  const explicit = agentLabel?.trim();
+  if (explicit) return explicit;
+
+  const command = agentCommand?.trim().toLowerCase() ?? "";
+  const title = paneTitle?.trim().toLowerCase() ?? "";
+  if (!command && !title) return null;
+  if (command.includes('codex')) return 'Codex';
+  if (command.includes('claude-minimax-free') || command.includes('minimax')) return 'MiniMax (cmf)';
+  if (
+    command.includes('claude.exe') ||
+    command.includes('claude code') ||
+    command.includes('claude') ||
+    title.includes('claude code') ||
+    title.includes('claude')
+  ) {
+    return 'Claude Code';
+  }
+  if (command.includes('bash') || command.includes('zsh') || command.includes('sh')) return 'Shell';
+  return agentCommand;
+}
 
 async function listSessions(): Promise<Session[]> {
   try {
-    const { stdout } = await execFileAsync(
-      TMUX_BIN,
-      ['list-sessions', '-F', '#{session_name}|#{session_created}|#{session_windows}'],
-      { timeout: 10_000 }
-    );
-    return stdout
+    const [sessionResult, paneResult] = await Promise.all([
+      execFileAsync(
+        TMUX_BIN,
+        ['list-sessions', '-F', '#{session_name}|#{session_created}|#{session_windows}|#{@agent_label}'],
+        { timeout: 10_000 }
+      ),
+      execFileAsync(
+        TMUX_BIN,
+        ['list-panes', '-a', '-F', '#{session_name}|#{pane_current_command}|#{pane_title}'],
+        { timeout: 10_000 }
+      ).catch(() => ({ stdout: '' })),
+    ]);
+    const paneBySession = new Map<string, { command: string | null; title: string | null }>();
+    paneResult.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .forEach((line) => {
+        const [name, command = '', title = ''] = line.split('|');
+        if (!name || paneBySession.has(name)) return;
+        paneBySession.set(name, {
+          command: command || null,
+          title: title || null,
+        });
+      });
+    return sessionResult.stdout
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
       .map((line) => {
-        const [name, created, windows] = line.split('|');
+        const [name, created, windows, agentLabel = ''] = line.split('|');
+        const pane = paneBySession.get(name);
+        const agentCommand = pane?.command ?? null;
+        const label = inferSessionLabel(agentLabel || null, agentCommand, pane?.title ?? null);
         return {
           name,
           created: Number(created) * 1000,
           windows: Number(windows),
+          agentLabel: label,
+          agentCommand,
         };
       });
   } catch {
