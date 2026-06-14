@@ -1,4 +1,4 @@
-![VoidSpark](voidspark.png)
+![VoidSpark](voidspark.webp)
 
 # VoidSpark
 
@@ -64,7 +64,6 @@ card) and GPU box (Settings) entirely from the UI. To seed them up front:
 
 ```
 VOIDSPARK_TARGET_REPO=         # abs path to the repo to drive (seeds the registry)
-ANTHROPIC_API_KEY=             # for whichever agent CLI you run
 AGENT_LAUNCHER=                # optional: override the vendored scripts/launch_agent.sh
 CODEX_MODEL=                   # optional: default gpt-5.4-mini
 MINIMAX_API_KEY=               # optional: enables MiniMax as a runner + its quota readout
@@ -73,10 +72,14 @@ CONVEX_DEPLOYMENT=             # optional
 NEXT_PUBLIC_CONVEX_URL=        # optional
 ```
 
+Your **coding agent authenticates itself** — log in with its own CLI, or, if it
+reads a key from the environment, put that key here and VoidSpark passes it
+through to the agent. VoidSpark never reads your agent's key directly.
+
 ### Requirements
 
 - Node 20+, `tmux` (agents run in detached tmux sessions)
-- A coding agent CLI on PATH (`claude`, `codex`, or `claude-minimax-free`).
+- A coding agent CLI on PATH (e.g. `claude` or `codex`), already authenticated.
   The tmux launcher ships vendored in [`scripts/launch_agent.sh`](scripts/launch_agent.sh) —
   no external skill install needed.
 - A target research repo + (optionally) a GPU box. The reference target is
