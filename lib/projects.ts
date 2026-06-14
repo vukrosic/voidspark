@@ -10,9 +10,10 @@ import { RESEARCH_REPO_DIR } from './codexLauncher';
 // that repo (its own ideas, prompts, queue, autorun state, GPU box).
 //
 // Two files, both in the VoidSpark repo root (NOT in any target repo, so they
-// survive switching):
-//   projects.json   — the registry (committed; ships with the default kit)
-//   .active-project  — the id of the active project (local state, gitignored)
+// survive switching). Both are per-machine state (they hold absolute paths) and
+// are gitignored — a fresh clone has neither and shows the onboarding card:
+//   projects.json   — the registry (gitignored; see projects.example.json)
+//   .active-project  — the id of the active project (gitignored)
 
 export type Project = {
   id: string;
