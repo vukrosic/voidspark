@@ -823,14 +823,14 @@
       "link": null,
       "locked": false,
       "type": "text",
-      "text": "npm run dev\nnpm run build\nnpm run codex:launch-server",
+      "text": "npm run dev\nnpm run build\nnpm run start",
       "fontSize": 16,
       "fontFamily": 1,
       "textAlign": "left",
       "verticalAlign": "top",
       "baseline": 47,
       "containerId": null,
-      "originalText": "npm run dev\nnpm run build\nnpm run codex:launch-server",
+      "originalText": "npm run dev\nnpm run build\nnpm run start",
       "lineHeight": 1.25
     },
     {

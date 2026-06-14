@@ -2,7 +2,7 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import { getAutoImplementAgent } from '@/lib/autoimplement';
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +19,9 @@ function statusOf(md: string): string {
 // so it doesn't sit attached/idle. The kill is detached + delayed so this
 // response reaches the curl before the session (which is running the curl) dies.
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let slug = '';
   try {
     ({ slug } = await req.json());

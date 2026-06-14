@@ -3,7 +3,7 @@ import { existsSync } from 'fs';
 import { readFile, writeFile, stat } from 'fs/promises';
 import { join } from 'path';
 import { promisify } from 'util';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 // ---- Monitor watchdog agent -------------------------------------------------
 // A persistent MiniMax agent (tmux session `lab-monitor`, driven by
@@ -177,6 +177,9 @@ async function startSession(): Promise<void> {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let body: { action?: string; prompt?: string; issues?: string } = {};
   try {
     body = await req.json();

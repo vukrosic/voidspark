@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
 
@@ -137,5 +137,8 @@ async function listIdeas(): Promise<Idea[]> {
 // POST-only: this site builds with `output: 'export'`, which rejects dynamic
 // GET route handlers. Returns the list of ideas on disk.
 export async function POST() {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   return Response.json({ success: true, ideas: await listIdeas() }, { status: 200 });
 }

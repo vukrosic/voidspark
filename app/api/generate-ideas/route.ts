@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises';
 import { launchCodexWithText } from '@/lib/codexLauncher';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const PROMPT_PATH = () => `${getActiveRepoDir()}/autoresearch/prompts/generate-ideas.md`;
 
@@ -15,6 +15,9 @@ function injectCount(prompt: string, count: number): string {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let agent: string | undefined;
   let headless = true;
   let count = 3;

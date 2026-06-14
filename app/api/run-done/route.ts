@@ -2,7 +2,7 @@ import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
 const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh');
@@ -18,6 +18,9 @@ function statusOf(md: string): string {
 // If it exits while still marked running, surface that as a fixable failure
 // instead of leaving the GPU queue wedged forever.
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let slug = '';
   try {
     ({ slug } = await req.json());

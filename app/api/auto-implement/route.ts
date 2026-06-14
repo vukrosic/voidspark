@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import {
   getAutoImplementAgent,
   setAutoImplement,
@@ -204,6 +204,9 @@ async function tick(host: string, agent: string): Promise<TickResult> {
 // calls this on load, on toggle, and on its poll — each call both reports state
 // and keeps the implement pipeline filled up to the cap.
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let body: { enabled?: unknown; agent?: unknown } = {};
   try {
     body = await req.json();

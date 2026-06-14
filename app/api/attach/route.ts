@@ -3,7 +3,7 @@ import { writeFile, chmod, unlink, readFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
 const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
@@ -23,6 +23,9 @@ async function openInTerminal(cmd: string) {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let body: { name?: string; remote?: boolean } = {};
   try {
     body = await req.json();

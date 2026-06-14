@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 // ---- Finished Experiments Leaderboard --------------------------------------
 // The leaderboard only shows ideas that have a verdict — i.e. the human
@@ -134,5 +134,8 @@ async function listFinishedIdeas(): Promise<LeaderboardRow[]> {
 // POST-only: same reason as the other API routes — the app builds with
 // `output: 'export'`-style dynamic handlers (training-curve, ideas, etc.).
 export async function POST() {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   return Response.json({ success: true, rows: await listFinishedIdeas() }, { status: 200 });
 }

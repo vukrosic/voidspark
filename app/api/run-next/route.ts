@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import { getRunnerExtra, renderRunnerExtra } from '@/lib/runnerExtra';
 
 const execFileAsync = promisify(execFile);
@@ -54,6 +54,9 @@ async function queueIdeas(): Promise<QueueIdea[]> {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let agent: string | undefined;
   let headless = true;
   try {

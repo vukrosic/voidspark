@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import { getAutopilotAgent, setAutopilot } from '@/lib/autopilot';
 
 // Autopilot tick. When ON, each call (the UI poll drives it) runs ONE
@@ -88,6 +88,9 @@ function injectCount(prompt: string, count: number): string {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let body: { enabled?: unknown; agent?: unknown } = {};
   try {
     body = await req.json();

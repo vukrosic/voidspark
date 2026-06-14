@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 // ---- Research records & closed experiments ----------------------------------
 // `autoresearch/closed.md` is the loop's live ledger: the reviewer/run step
@@ -119,6 +119,9 @@ function parseLine(raw: string): ClosedEvent | null {
 }
 
 export async function POST() {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let md: string;
   try {
     md = await readFile(closedPath(), 'utf8');

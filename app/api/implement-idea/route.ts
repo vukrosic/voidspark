@@ -1,7 +1,7 @@
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const TEMPLATE_PATH = () => `${getActiveRepoDir()}/autoresearch/prompts/implement-idea.md`;
 
@@ -60,6 +60,9 @@ async function recodePreamble(slug: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let slug = '';
   let agent: string | undefined;
   let headless = true;

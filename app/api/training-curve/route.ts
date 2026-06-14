@@ -1,6 +1,6 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const RESULTS_DIR = () => join(getActiveRepoDir(), 'remote-results');
 
@@ -82,6 +82,9 @@ async function readRun(
 }
 
 export async function POST(request: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   // id comes from the POST body — POST route handlers aren't prerendered under
   // `output: export`, which a GET handler would be (and would then 500). This
   // matches the other dynamic API routes (ideas/gpu/tmux), all POST.
