@@ -72,7 +72,7 @@ export async function POST(req: Request) {
   try {
     if (await getAutoImplementAgent()) {
       autoImplement = true;
-      const host = req.headers.get('host') ?? 'localhost:3001';
+      const host = req.headers.get('host') ?? 'localhost:3000';
       fetch(`http://${host}/api/auto-implement/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

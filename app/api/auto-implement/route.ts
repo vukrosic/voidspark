@@ -219,7 +219,7 @@ export async function POST(req: Request) {
   const current = await getAutoImplementAgent();
   let result: TickResult = { launched: [], rejected: [], escalated: [] };
   if (current) {
-    const host = req.headers.get('host') ?? 'localhost:3001';
+    const host = req.headers.get('host') ?? 'localhost:3000';
     result = await tick(host, current);
   }
 

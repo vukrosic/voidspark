@@ -43,6 +43,9 @@ next-env.d.ts
 # claude code local config
 .claude/
 
+# agent-generated media (app screenshots, etc.)
+.codex-media/
+
 # VoidSpark local state — per-machine project registry + active pointer.
 # Both hold absolute paths specific to your machine, so they don't ship.
 # Fresh clones start from projects.example.json via the onboarding card.

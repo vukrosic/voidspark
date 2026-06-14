@@ -17,6 +17,7 @@ const DOC_GROUPS: DocGroup[] = [
     blurb: "What VoidSpark is and how to get it running.",
     docs: [
       { path: "README.md", title: "README", hint: "What VoidSpark is, first run, the roadmap" },
+      { path: "AGENT.md", title: "AGENT", hint: "Runbook for an AI agent to set VoidSpark up for you" },
       { path: "docs/architecture.md", title: "Architecture", hint: "The loop, the gates, the status state machine" },
     ],
   },
@@ -34,6 +35,7 @@ const DOC_GROUPS: DocGroup[] = [
     blurb: "When something needs fixing or you want the details.",
     docs: [
       { path: "docs/troubleshooting.md", title: "Troubleshooting", hint: "Common snags on a fresh machine + fixes" },
+      { path: "CONTRIBUTING.md", title: "Contributing", hint: "What you need + how to open a PR" },
       { path: "scripts/README.md", title: "Scripts", hint: "Agent launch + monitor watchdog scripts" },
     ],
   },

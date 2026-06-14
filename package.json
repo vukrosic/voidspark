@@ -3,6 +3,21 @@
   "version": "0.0.1",
   "private": true,
   "license": "MIT",
+  "description": "A localhost autonomous-research loop you point at your own code.",
+  "author": "Vuk Rosić",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vukrosic/voidspark.git"
+  },
+  "homepage": "https://github.com/vukrosic/voidspark#readme",
+  "keywords": [
+    "ai-research",
+    "autonomous-agents",
+    "research-automation",
+    "llm",
+    "localhost",
+    "nextjs"
+  ],
   "scripts": {
     "dev": "next dev",
     "build": "next build",

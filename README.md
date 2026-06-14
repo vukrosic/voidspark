@@ -1,3 +1,5 @@
+![VoidSpark](voidspark.png)
+
 # VoidSpark
 
 **A localhost autonomous-research loop you point at your own code.**
@@ -10,6 +12,23 @@ API keys and your hardware. Nothing leaves your box.
 > Status: early extraction (M0). You point it at one local research repo today;
 > the generic adapter layer that will let it drive *any* repo with one config
 > file is in progress — see [Roadmap](#roadmap).
+
+## Set it up with an AI agent (easiest)
+
+Have an AI coding agent (Claude Code, Codex, Cursor, …) do the setup for you.
+Paste this prompt into your agent:
+
+```
+Clone https://github.com/vukrosic/voidspark and read AGENT.md in the repo,
+then set it up on my machine following those instructions.
+```
+
+[AGENT.md](AGENT.md) is a runbook the agent follows: it checks prerequisites,
+installs deps, configures `.env.local`, helps you pick a target research repo,
+and starts the dashboard — asking you only for the few things it can't determine
+(your API key, which repo to drive).
+
+Prefer to do it by hand? Follow the manual steps below.
 
 ## First run
 
