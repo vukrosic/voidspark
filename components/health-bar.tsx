@@ -9,6 +9,7 @@ import {
   Gauge,
   Lightbulb,
   LoaderCircle,
+  Play,
   Sparkles,
   Trophy,
 } from "lucide-react";
@@ -29,9 +30,19 @@ type Health = {
     dead: string[];
   };
   gpu: { alive: boolean; upMs: number | null; autorun: string | null };
-  ideas: { inFlight: number; needsRun: number; total: number; floor: number; ceiling: number };
+  ideas: {
+    inFlight: number;
+    needsRun: number;
+    total: number;
+    done: number;
+    rejected: number;
+    running: string[];
+    floor: number;
+    ceiling: number;
+  };
   throughput: { flipsLastHour: number; lastFlipMs: number | null };
   best: { val: number; idea: string } | null;
+  records: { count: number; lastRecordAgeMs: number | null };
 };
 
 type Minimax = {
@@ -39,6 +50,14 @@ type Minimax = {
   intervalPercent?: number;
   weeklyPercent?: number;
   exhausted?: boolean;
+};
+
+type GpuUsage = {
+  success: boolean;
+  utilization?: number;
+  memUsed?: number;
+  memTotal?: number;
+  arqAlive?: boolean;
 };
 
 // ms -> compact "4m" / "2h" / "3d" / "12s".
@@ -123,6 +142,7 @@ export default function HealthBar({
 }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [minimax, setMinimax] = useState<Minimax | null>(null);
+  const [gpu, setGpu] = useState<GpuUsage | null>(null);
   const [reaping, setReaping] = useState(false);
 
   useEffect(() => {
@@ -159,6 +179,26 @@ export default function HealthBar({
     };
   }, []);
 
+  // Real GPU utilization, straight from the box (nvidia-smi over SSH). This is
+  // ground truth for "is the box actually working vs idle" — separate, slower
+  // poll because it pays an SSH round-trip.
+  useEffect(() => {
+    let alive = true;
+    const pull = () =>
+      fetch("/api/gpu-usage/", { method: "POST" })
+        .then((r) => r.json())
+        .then((d) => {
+          if (alive) setGpu(d);
+        })
+        .catch(() => {});
+    pull();
+    const id = setInterval(pull, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
   // Kill every dead w_<n> pane the snapshot reported, then refresh quickly.
   const reap = useCallback(async () => {
     if (!health?.workers.dead.length || reaping) return;
@@ -185,7 +225,16 @@ export default function HealthBar({
   const deadCount = health?.workers.dead.length ?? 0;
   const inFlight = health?.ideas.inFlight ?? 0;
   const floor = health?.ideas.floor ?? 5;
+  const needsRun = health?.ideas.needsRun ?? 0;
+  const running = health?.ideas.running ?? [];
   const lastFlipMs = health?.throughput.lastFlipMs ?? null;
+  const lastWinMs = health?.records.lastRecordAgeMs ?? null;
+  // Real GPU utilization from the box. The contradiction the operator caught —
+  // "drainer working" while the box is idle — is settled here: util < 5% with
+  // runs queued means the paid GPU is wasted, regardless of what the loop says.
+  const gpuUtil = gpu?.success && gpu.utilization != null ? gpu.utilization : null;
+  const gpuTraining = gpuUtil != null && gpuUtil >= 5;
+  const gpuIdleWithWork = gpuUtil != null && gpuUtil < 5 && needsRun > 0;
   // The loop is "stalled" when autoresearch is on but nothing has flipped in a
   // while — the single signal that something upstream is wedged.
   const stalled = autoresearchOn && lastFlipMs != null && lastFlipMs > 20 * 60_000;
@@ -270,6 +319,42 @@ export default function HealthBar({
           title="lab-autorun — the loop that SSHes to the box and drains the GPU queue"
         />
 
+        <Chip
+          icon={<Cpu className="h-3 w-3" aria-hidden />}
+          label="GPU util"
+          value={gpuUtil != null ? `${Math.round(gpuUtil)}%` : "—"}
+          sub={
+            gpu == null
+              ? "…"
+              : !gpu.success
+                ? "unreachable"
+                : gpu.arqAlive
+                  ? "training"
+                  : gpuTraining
+                    ? "busy"
+                    : gpuIdleWithWork
+                      ? `idle · ${needsRun} queued!`
+                      : "idle"
+          }
+          tone={gpuUtil == null ? "muted" : gpuIdleWithWork ? "bad" : gpuTraining ? "ok" : "warn"}
+          title="Real nvidia-smi GPU utilization from the box. Idle (<5%) while runs are queued = paid GPU sitting wasted — this is the ground truth, not the drainer's self-report."
+        />
+
+        <Chip
+          icon={<Play className="h-3 w-3" aria-hidden />}
+          label="Running"
+          value={running.length === 0 ? "—" : running.length === 1 ? running[0].split("-")[0] : running.length}
+          sub={
+            running.length === 0
+              ? "nothing on GPU"
+              : running.length === 1
+                ? running[0].split("-").slice(1).join("-")
+                : `${running.length} experiments`
+          }
+          tone={running.length ? "ok" : "muted"}
+          title={running.length ? `Currently in 'running':\n${running.join("\n")}` : "No experiment in the running state right now"}
+        />
+
         {deadCount > 0 ? (
           <Tip text={`Dead tmux panes (no live worker):\n${health?.workers.dead.join("\n")}\n\nClick to reap.`}>
             <button
@@ -347,6 +432,24 @@ export default function HealthBar({
             title={`Best val loss so far — ${health.best.idea}`}
           />
         ) : null}
+
+        <Chip
+          icon={<Trophy className="h-3 w-3" aria-hidden />}
+          label="Last record"
+          value={lastWinMs != null ? ago(lastWinMs) : "—"}
+          sub={`${health?.records.count ?? 0} record${(health?.records.count ?? 0) === 1 ? "" : "s"}`}
+          tone={lastWinMs != null && lastWinMs > 6 * 3_600_000 ? "warn" : "muted"}
+          title="Time since the last record-breaking result (new best loss). A long dry spell means recent experiments aren't beating the baseline."
+        />
+
+        <Chip
+          icon={<Lightbulb className="h-3 w-3" aria-hidden />}
+          label="Experiments"
+          value={health?.ideas.done ?? "—"}
+          sub={`${health?.ideas.rejected ?? 0} rejected · ${health?.ideas.total ?? 0} ideas`}
+          tone="muted"
+          title="Ideas that completed the full pipeline (done), plus how many were rejected and the total idea count."
+        />
       </div>
     </div>
   );

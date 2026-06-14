@@ -42,7 +42,7 @@ function ago(ms: number | null): string {
 
 export default function MonitorPanel() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<"summary" | "terminal">("summary");
+  const [tab, setTab] = useState<"summary" | "terminal">("terminal");
   const [data, setData] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -192,7 +192,7 @@ export default function MonitorPanel() {
                   type="button"
                   onClick={() => act("start")}
                   disabled={busy}
-                  title="Start the monitor agent (MiniMax in tmux, refreshes every minute)"
+                  title="Start the monitor agent — an interactive MiniMax in tmux you can chat with; it auto-summarizes every few minutes"
                   className="inline-flex h-7 items-center gap-1 rounded-md border border-emerald-400/40 bg-emerald-400/10 px-2 text-[11px] font-medium text-emerald-200 transition hover:bg-emerald-400/20 disabled:opacity-50"
                 >
                   {busy ? <LoaderCircle className="h-3 w-3 animate-spin" aria-hidden /> : <Play className="h-3 w-3" aria-hidden />}
@@ -222,7 +222,7 @@ export default function MonitorPanel() {
 
           {/* Tabs */}
           <div className="flex items-center gap-1 border-b border-white/10 px-3 pt-2">
-            {(["summary", "terminal"] as const).map((t) => (
+            {(["terminal", "summary"] as const).map((t) => (
               <button
                 key={t}
                 type="button"
@@ -234,7 +234,7 @@ export default function MonitorPanel() {
                 }`}
               >
                 {t === "summary" ? <Activity className="h-3 w-3" aria-hidden /> : <TerminalIcon className="h-3 w-3" aria-hidden />}
-                {t === "summary" ? "Summary" : "Terminal"}
+                {t === "summary" ? "Last summary" : "Chat"}
               </button>
             ))}
           </div>
@@ -297,8 +297,8 @@ export default function MonitorPanel() {
               ) : (
                 <div className="mt-8 text-center text-xs text-[#faf9f6]/40">
                   {alive
-                    ? "Waiting for the first summary… (refreshes about once a minute)"
-                    : "Monitor is stopped. Press Start to launch the watchdog agent."}
+                    ? "No summary written yet — the agent mirrors its latest summary here. Switch to Chat to talk to it."
+                    : "Monitor is stopped. Press Start to launch the interactive watchdog agent."}
                 </div>
               )}
             </div>
@@ -348,7 +348,7 @@ export default function MonitorPanel() {
           )}
 
           <div className="border-t border-white/10 px-4 py-2 text-[10px] text-[#faf9f6]/35">
-            tmux <code className="text-[#faf9f6]/55">lab-monitor</code> · summary refreshes every {data?.interval ?? 60}s
+            interactive cmf in tmux <code className="text-[#faf9f6]/55">lab-monitor</code> · auto-summary every {Math.round((data?.interval ?? 180) / 60)}m · type below to chat
           </div>
         </aside>
       ) : null}

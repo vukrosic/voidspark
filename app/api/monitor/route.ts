@@ -26,8 +26,9 @@ const TMUX_BIN =
     existsSync(p)
   ) ?? 'tmux';
 
-const SESSION = 'lab-monitor';
-const INTERVAL = 60; // seconds between refreshes
+const SESSION = 'lab-monitor'; // the interactive cmf agent you chat with
+const BEAT_SESSION = 'lab-monitor-beat'; // tiny loop that nudges it for summaries
+const INTERVAL = 180; // seconds between auto-refresh nudges
 
 const promptPath = () =>
   join(getActiveRepoDir(), 'autoresearch', 'monitor-prompt.md');
@@ -35,7 +36,9 @@ const issuesPath = () =>
   join(getActiveRepoDir(), 'autoresearch', 'monitor-issues.md');
 const summaryPath = () =>
   join(getActiveRepoDir(), 'autoresearch', 'monitor-summary.md');
-const loopScript = () => join(process.cwd(), 'scripts', 'monitor_loop.sh');
+const primePath = () =>
+  join(getActiveRepoDir(), 'autoresearch', 'monitor-prime.txt');
+const beatScript = () => join(process.cwd(), 'scripts', 'monitor_beat.sh');
 
 // Default watchdog brief. Written on first start if no prompt exists yet; the
 // user can edit it from the panel afterward. Tuned for a terse, scannable report
@@ -129,25 +132,48 @@ async function buildStatus() {
   };
 }
 
-// Launch the loop in a detached, attachable tmux session. We strip
-// npm_config_prefix (the Next dev server sets it, which makes nvm refuse to load
-// in the spawned shell, hiding claude-minimax-free from PATH) and run through a
-// login shell so the agent binary resolves — same fix codexLauncher uses.
+// Build the priming message the interactive agent opens with: base brief + the
+// editable issue checklist + an interactive wrapper telling it to summarize now,
+// then stay in its REPL to chat and re-summarize on each auto-refresh nudge.
+async function buildPrime(): Promise<string> {
+  return `${await readPrompt()}
+
+## ISSUE CHECKLIST — evaluate EACH rule against current state whenever you summarize; report a "## Issues" section listing only the rules TRUE right now (with evidence), or "none":
+${await readIssues()}
+
+---
+This is a LIVE INTERACTIVE session, not a one-shot. Do this now: run the read-only checks and give me your first status summary. Then STAY in your prompt — I will chat with you and ask follow-up questions, and a periodic "Auto-refresh" message will ask you to regenerate the summary. On every summary, re-run the checks fresh (curl -s http://localhost:3000/api/health/, curl -s -X POST http://localhost:3000/api/gpu-usage/, tmux ls, capture-pane on suspect sessions).
+
+You only OBSERVE the research system — never modify ideas, code, configs, or flags. The ONLY file you may write is the dashboard mirror: each time you produce a status summary, also write that summary verbatim (the markdown only) to autoresearch/monitor-summary.md, overwriting it, so the cockpit's "Last summary" view stays current.`;
+}
+
+// Launch the watchdog as an INTERACTIVE cmf agent (its REPL stays open so the
+// user can chat with it), plus a heartbeat session that types an auto-refresh
+// request to it every INTERVAL. We strip npm_config_prefix (the Next dev server
+// sets it, which makes nvm refuse to load in the spawned shell, hiding
+// claude-minimax-free from PATH) and run through a login shell so the binary
+// resolves — same fix codexLauncher uses. The bash -lc arg is single-quoted so
+// the outer zsh doesn't expand the inner "$(cat prime)" — bash does, once.
 async function startSession(): Promise<void> {
   const env = { ...process.env };
   delete env.npm_config_prefix;
   delete env.NPM_CONFIG_PREFIX;
+  const repo = getActiveRepoDir();
 
-  await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', SESSION, '-x', '220', '-y', '50'], {
-    env,
-    timeout: 10_000,
-  });
-  const cmd = `unset npm_config_prefix NPM_CONFIG_PREFIX; exec ${loopScript()} ${getActiveRepoDir()} ${INTERVAL}`;
-  await execFileAsync(TMUX_BIN, ['send-keys', '-t', SESSION, '-l', `bash -lc ${JSON.stringify(cmd)}`], {
-    env,
-    timeout: 10_000,
-  });
+  await writeFile(primePath(), await buildPrime(), 'utf8').catch(() => {});
+
+  // 1) The interactive agent. `claude-minimax-free "<prime>"` with NO -p starts
+  //    cmf, sends the prime as the first message, and stays in the REPL.
+  await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', SESSION, '-x', '220', '-y', '50'], { env, timeout: 10_000 });
+  const launch = `bash -lc 'unset npm_config_prefix NPM_CONFIG_PREFIX; cd ${repo}; claude-minimax-free "$(cat ${primePath()})"'`;
+  await execFileAsync(TMUX_BIN, ['send-keys', '-t', SESSION, '-l', launch], { env, timeout: 10_000 });
   await execFileAsync(TMUX_BIN, ['send-keys', '-t', SESSION, 'Enter'], { env, timeout: 10_000 });
+
+  // 2) The heartbeat. Types an auto-refresh request to the agent every INTERVAL.
+  await execFileAsync(TMUX_BIN, ['new-session', '-d', '-s', BEAT_SESSION, '-x', '80', '-y', '10'], { env, timeout: 10_000 }).catch(() => {});
+  const beat = `bash -lc 'unset npm_config_prefix NPM_CONFIG_PREFIX; exec ${beatScript()} ${SESSION} ${INTERVAL}'`;
+  await execFileAsync(TMUX_BIN, ['send-keys', '-t', BEAT_SESSION, '-l', beat], { env, timeout: 10_000 }).catch(() => {});
+  await execFileAsync(TMUX_BIN, ['send-keys', '-t', BEAT_SESSION, 'Enter'], { env, timeout: 10_000 }).catch(() => {});
 }
 
 export async function POST(req: Request) {
@@ -182,9 +208,8 @@ export async function POST(req: Request) {
   }
 
   if (action === 'stop') {
-    await execFileAsync(TMUX_BIN, ['kill-session', '-t', SESSION], { timeout: 10_000 }).catch(
-      () => {}
-    );
+    await execFileAsync(TMUX_BIN, ['kill-session', '-t', SESSION], { timeout: 10_000 }).catch(() => {});
+    await execFileAsync(TMUX_BIN, ['kill-session', '-t', BEAT_SESSION], { timeout: 10_000 }).catch(() => {});
     return Response.json(await buildStatus(), { status: 200 });
   }
 
