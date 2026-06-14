@@ -48,8 +48,13 @@ run_agent() {
   bash -c "$1"' "$1"' _ "$2"
 }
 
-LOG="$(mktemp "/tmp/agent_fallback.XXXXXX.log")"
-RCFILE="$(mktemp "/tmp/agent_fallback.XXXXXX.rc")"
+# NOTE: trailing-X templates ONLY. BSD mktemp (macOS /usr/bin/mktemp) does NOT
+# randomize when a suffix follows the X's — `mktemp foo.XXXXXX.log` creates a
+# LITERAL file `foo.XXXXXX.log`, so the 2nd concurrent worker dies "File exists"
+# and $LOG ends up empty, collapsing the whole wrapper. Orchestrate fans workers
+# out in parallel, so that broke every gate but one. Keep the X's at the end.
+LOG="$(mktemp "${TMPDIR:-/tmp}/agent_fallback.XXXXXX")"
+RCFILE="$(mktemp "${TMPDIR:-/tmp}/agent_fallback.XXXXXX")"
 cleanup() { rm -f "$LOG" "$RCFILE" 2>/dev/null || true; }
 trap cleanup EXIT
 
