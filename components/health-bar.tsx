@@ -9,7 +9,6 @@ import {
   Gauge,
   Lightbulb,
   LoaderCircle,
-  Play,
   Sparkles,
   Trophy,
 } from "lucide-react";
@@ -118,7 +117,7 @@ function Chip({
 }) {
   const body = (
     <div
-      className={`flex min-w-[96px] flex-col rounded-md border bg-white/[0.03] px-2.5 py-1.5 ${toneRing[tone]}`}
+      className={`flex min-w-[84px] shrink-0 flex-col rounded-md border bg-white/[0.03] px-2.5 py-1 ${toneRing[tone]}`}
     >
       <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[#faf9f6]/45">
         {icon}
@@ -226,7 +225,6 @@ export default function HealthBar({
   const inFlight = health?.ideas.inFlight ?? 0;
   const floor = health?.ideas.floor ?? 5;
   const needsRun = health?.ideas.needsRun ?? 0;
-  const running = health?.ideas.running ?? [];
   const lastFlipMs = health?.throughput.lastFlipMs ?? null;
   const lastWinMs = health?.records.lastRecordAgeMs ?? null;
   // Real GPU utilization from the box. The contradiction the operator caught —
@@ -273,7 +271,7 @@ export default function HealthBar({
             type="button"
             onClick={onToggle}
             disabled={busy}
-            className={`inline-flex h-9 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+            className={`inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border px-3 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
               autoresearchOn
                 ? "border-violet-400/60 bg-violet-400/20 text-violet-100 hover:bg-violet-400/30 focus:ring-violet-400/40"
                 : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
@@ -289,6 +287,8 @@ export default function HealthBar({
         </Tip>
 
         <span className={`mr-1 inline-block h-2 w-2 shrink-0 rounded-full ${dot}`} aria-hidden />
+
+        {/* Compact single-row strip — only the high-signal chips. */}
 
         {/* Chips */}
         <Chip
@@ -312,15 +312,6 @@ export default function HealthBar({
 
         <Chip
           icon={<Cpu className="h-3 w-3" aria-hidden />}
-          label="GPU drainer"
-          value={health ? (health.gpu.alive ? "live" : "down") : "—"}
-          sub={health?.gpu.alive ? `up ${ago(health.gpu.upMs)}` : health?.gpu.autorun ? "on, no session" : "off"}
-          tone={!health ? "muted" : health.gpu.alive ? "ok" : autoresearchOn ? "bad" : "muted"}
-          title="lab-autorun — the loop that SSHes to the box and drains the GPU queue"
-        />
-
-        <Chip
-          icon={<Cpu className="h-3 w-3" aria-hidden />}
           label="GPU util"
           value={gpuUtil != null ? `${Math.round(gpuUtil)}%` : "—"}
           sub={
@@ -338,21 +329,6 @@ export default function HealthBar({
           }
           tone={gpuUtil == null ? "muted" : gpuIdleWithWork ? "bad" : gpuTraining ? "ok" : "warn"}
           title="Real nvidia-smi GPU utilization from the box. Idle (<5%) while runs are queued = paid GPU sitting wasted — this is the ground truth, not the drainer's self-report."
-        />
-
-        <Chip
-          icon={<Play className="h-3 w-3" aria-hidden />}
-          label="Running"
-          value={running.length === 0 ? "—" : running.length === 1 ? running[0].split("-")[0] : running.length}
-          sub={
-            running.length === 0
-              ? "nothing on GPU"
-              : running.length === 1
-                ? running[0].split("-").slice(1).join("-")
-                : `${running.length} experiments`
-          }
-          tone={running.length ? "ok" : "muted"}
-          title={running.length ? `Currently in 'running':\n${running.join("\n")}` : "No experiment in the running state right now"}
         />
 
         {deadCount > 0 ? (
@@ -422,17 +398,6 @@ export default function HealthBar({
           title="MiniMax 5-hour interval quota remaining. At 0 it 429s and the launcher falls back to Codex."
         />
 
-        {health?.best ? (
-          <Chip
-            icon={<Trophy className="h-3 w-3" aria-hidden />}
-            label="Best loss"
-            value={health.best.val.toFixed(3)}
-            sub={health.best.idea.split("-").slice(1).join("-") || health.best.idea}
-            tone="ok"
-            title={`Best val loss so far — ${health.best.idea}`}
-          />
-        ) : null}
-
         <Chip
           icon={<Trophy className="h-3 w-3" aria-hidden />}
           label="Last record"
@@ -440,15 +405,6 @@ export default function HealthBar({
           sub={`${health?.records.count ?? 0} record${(health?.records.count ?? 0) === 1 ? "" : "s"}`}
           tone={lastWinMs != null && lastWinMs > 6 * 3_600_000 ? "warn" : "muted"}
           title="Time since the last record-breaking result (new best loss). A long dry spell means recent experiments aren't beating the baseline."
-        />
-
-        <Chip
-          icon={<Lightbulb className="h-3 w-3" aria-hidden />}
-          label="Experiments"
-          value={health?.ideas.done ?? "—"}
-          sub={`${health?.ideas.rejected ?? 0} rejected · ${health?.ideas.total ?? 0} ideas`}
-          tone="muted"
-          title="Ideas that completed the full pipeline (done), plus how many were rejected and the total idea count."
         />
       </div>
     </div>

@@ -6,8 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint",
-    "codex:launch-server": "node scripts/codex-launch-server.mjs"
+    "lint": "eslint"
   },
   "dependencies": {
     "framer-motion": "^12.27.0",

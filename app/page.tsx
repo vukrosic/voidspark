@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Activity,
   Cpu,
+  Eye,
+  EyeOff,
   FileText,
   Gauge,
   Lightbulb,
@@ -294,6 +296,12 @@ export default function LaunchCodexPage() {
   // re-points every agent/API at that repo (see lib/projects.ts).
   const [projects, setProjects] = useState<{ id: string; name: string; repoPath: string }[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string>("");
+  // False until the registry fetch resolves, so we don't flash the onboarding
+  // card before we know whether any project exists.
+  const [projectsLoaded, setProjectsLoaded] = useState<boolean>(false);
+  // No project registered yet (fresh clone) — the cockpit shows the onboarding
+  // card instead of the ideas/queue sections until the user adds a repo.
+  const hasProject = projects.length > 0;
   const [projectSwitching, setProjectSwitching] = useState<boolean>(false);
   // Sidebar "Add repo" form. Hidden by default; the + button opens the native
   // folder picker, then surfaces this form pre-filled.
@@ -325,6 +333,15 @@ export default function LaunchCodexPage() {
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   // Wraps the gear button + popover so a click anywhere outside closes it.
   const settingsRef = useRef<HTMLDivElement>(null);
+  // GPU box (Vast.ai) connection — paste the SSH command Vast gives you; the
+  // server parses host/port/user into the active repo's remote-box.json.
+  const [boxSsh, setBoxSsh] = useState<string>("");
+  const [boxRepo, setBoxRepo] = useState<string>("");
+  const [boxVenv, setBoxVenv] = useState<string>("");
+  const [boxShow, setBoxShow] = useState<boolean>(false);
+  const [boxBusy, setBoxBusy] = useState<boolean>(false);
+  const [boxMsg, setBoxMsg] = useState<string>("");
+  const [boxConfigured, setBoxConfigured] = useState<{ host: string; port: number | null; user: string } | null>(null);
   const [expandedIdeaGroups, setExpandedIdeaGroups] = useState<Set<string>>(
     () => new Set()
   );
@@ -644,7 +661,8 @@ export default function LaunchCodexPage() {
       })
       .catch(() => {
         /* no registry */
-      });
+      })
+      .finally(() => setProjectsLoaded(true));
   }, []);
 
   // Auto-implement: a bodyless POST reports state AND drives one tick (launches
@@ -1058,6 +1076,54 @@ export default function LaunchCodexPage() {
       setAddRepoOpen(true);
     } finally {
       setAddRepoPicking(false);
+    }
+  };
+
+  // Load the current GPU box connection whenever the Settings popover opens, so
+  // the field reflects what's in the active repo's remote-box.json.
+  useEffect(() => {
+    if (!settingsOpen || !hasProject) return;
+    let alive = true;
+    fetch("/api/remote-box/")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive || !d?.ok) return;
+        setBoxSsh(d.ssh ?? "");
+        setBoxRepo(d.remote_repo ?? "");
+        setBoxVenv(d.remote_venv ?? "");
+        setBoxConfigured(
+          d.configured ? { host: d.host, port: d.port, user: d.user } : null
+        );
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [settingsOpen, hasProject]);
+
+  // Parse + persist the pasted Vast.ai SSH command into remote-box.json.
+  const handleSaveBox = async () => {
+    if (boxBusy || !boxSsh.trim()) return;
+    setBoxBusy(true);
+    setBoxMsg("");
+    try {
+      const response = await fetch("/api/remote-box/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ssh: boxSsh.trim(), remote_repo: boxRepo.trim(), remote_venv: boxVenv.trim() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!data?.ok) {
+        setBoxMsg(data?.error ?? "Couldn't save the GPU box.");
+        setBoxConfigured(null);
+        return;
+      }
+      setBoxConfigured({ host: data.host, port: data.port, user: data.user });
+      setBoxMsg(`Saved · ${data.user}@${data.host}:${data.port}`);
+    } catch {
+      setBoxMsg("Network error — is the dev server running?");
+    } finally {
+      setBoxBusy(false);
     }
   };
 
@@ -2265,6 +2331,74 @@ export default function LaunchCodexPage() {
 
               <div className="mt-4 border-t border-white/10 pt-3">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
+                  GPU box (Vast.ai)
+                </span>
+                <p className="mt-1.5 text-[10px] leading-snug text-[#faf9f6]/40">
+                  Paste the SSH command from your Vast.ai instance — host, port, and user are parsed
+                  into <span className="font-mono">remote-box.json</span>.
+                </p>
+                <div className="mt-2 flex gap-1.5">
+                  <input
+                    type={boxShow ? "text" : "password"}
+                    value={boxSsh}
+                    onChange={(e) => setBoxSsh(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveBox(); }}
+                    placeholder="ssh -p 52674 root@1.2.3.4"
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="h-8 flex-1 rounded-md border border-white/12 bg-[#1f1e1d] px-2.5 font-mono text-[11px] text-[#faf9f6]/85 focus:border-white/30 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setBoxShow((v) => !v)}
+                    title={boxShow ? "Hide" : "Show"}
+                    className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/12 text-[#faf9f6]/55 transition hover:border-white/30 hover:text-white"
+                  >
+                    {boxShow ? <EyeOff className="h-3.5 w-3.5" aria-hidden /> : <Eye className="h-3.5 w-3.5" aria-hidden />}
+                  </button>
+                </div>
+                <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+                  <input
+                    value={boxRepo}
+                    onChange={(e) => setBoxRepo(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveBox(); }}
+                    placeholder="remote repo (/root/…)"
+                    spellCheck={false}
+                    className="h-7 w-full rounded-md border border-white/12 bg-[#1f1e1d] px-2 font-mono text-[10px] text-[#faf9f6]/80 focus:border-white/30 focus:outline-none"
+                  />
+                  <input
+                    value={boxVenv}
+                    onChange={(e) => setBoxVenv(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleSaveBox(); }}
+                    placeholder="venv (/venv/main)"
+                    spellCheck={false}
+                    className="h-7 w-full rounded-md border border-white/12 bg-[#1f1e1d] px-2 font-mono text-[10px] text-[#faf9f6]/80 focus:border-white/30 focus:outline-none"
+                  />
+                </div>
+                <div className="mt-2 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSaveBox}
+                    disabled={boxBusy || !boxSsh.trim()}
+                    className="inline-flex h-7 items-center rounded-md border border-violet-400/50 bg-violet-400/15 px-2.5 text-[11px] font-medium text-violet-100 transition hover:bg-violet-400/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {boxBusy ? "Saving…" : "Save box"}
+                  </button>
+                  {boxConfigured ? (
+                    <span className="truncate font-mono text-[10px] text-emerald-300/80">
+                      {boxConfigured.user}@{boxConfigured.host}:{boxConfigured.port}
+                    </span>
+                  ) : null}
+                </div>
+                {boxMsg ? (
+                  <p className={`mt-1.5 text-[10px] leading-snug ${boxMsg.startsWith("Saved") ? "text-emerald-300/80" : "text-rose-300/90"}`}>
+                    {boxMsg}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="mt-4 border-t border-white/10 pt-3">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
                   Edit prompts
                 </span>
                 <div className="mt-2 flex flex-col gap-1.5 text-xs">
@@ -2338,6 +2472,82 @@ export default function LaunchCodexPage() {
           )}
           </div>
         </div>
+
+        {/* First-run onboarding — no project registered yet. The whole loop is
+            scoped to one research repo, so until the user adds one there's
+            nothing to show. Reuses the sidebar add-project flow. */}
+        {projectsLoaded && !hasProject ? (
+          <section className="mt-10 w-full max-w-xl">
+            <div className="rounded-2xl border border-white/12 bg-[#262524] p-8 shadow-xl shadow-black/30">
+              <h2 className="text-lg font-semibold text-[#faf9f6]">Point VoidSpark at a research repo</h2>
+              <p className="mt-2 text-sm leading-relaxed text-[#faf9f6]/55">
+                VoidSpark drives one local repo at a time — mining ideas, implementing them behind a
+                flag, running the A/B on your GPU, and judging the result. Add the absolute path to
+                that repo to begin.
+              </p>
+
+              <div className="mt-6 flex flex-col gap-2">
+                <label className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
+                  Repo folder (absolute path)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    value={addRepoPath}
+                    onChange={(e) => setAddRepoPath(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleAddProject(); }}
+                    placeholder="/Users/you/code/your-research-repo"
+                    spellCheck={false}
+                    className="h-10 flex-1 rounded-lg border border-white/12 bg-[#1f1e1d] px-3 font-mono text-sm text-[#faf9f6]/85 focus:border-white/30 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handlePickFolder}
+                    disabled={addRepoPicking}
+                    title="Open the OS folder picker"
+                    className="inline-flex h-10 items-center rounded-lg border border-white/15 bg-white/[0.04] px-3 text-xs font-medium text-[#faf9f6]/70 transition hover:border-white/30 hover:text-white disabled:opacity-50"
+                  >
+                    {addRepoPicking ? "Opening…" : "Browse…"}
+                  </button>
+                </div>
+                <input
+                  value={addRepoName}
+                  onChange={(e) => setAddRepoName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddProject(); }}
+                  placeholder="Display name (optional)"
+                  spellCheck={false}
+                  className="h-10 w-full rounded-lg border border-white/12 bg-[#1f1e1d] px-3 text-sm text-[#faf9f6]/85 focus:border-white/30 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddProject}
+                  disabled={addRepoBusy || !addRepoPath.trim()}
+                  className="mt-1 inline-flex h-10 items-center justify-center rounded-lg border border-violet-400/50 bg-violet-400/20 px-4 text-sm font-medium text-violet-100 transition hover:bg-violet-400/30 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {addRepoBusy ? "Adding…" : "Add repo & start"}
+                </button>
+                {addRepoError && (
+                  <p className="text-[11px] leading-snug text-rose-300/90">{addRepoError}</p>
+                )}
+              </div>
+
+              <p className="mt-6 border-t border-white/10 pt-4 text-[11px] leading-relaxed text-[#faf9f6]/40">
+                Don&apos;t have one yet? Clone the reference target{" "}
+                <a
+                  href="https://github.com/vukrosic/universe-lm"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-mono text-violet-300/80 underline-offset-2 hover:underline"
+                >
+                  github.com/vukrosic/universe-lm
+                </a>{" "}
+                and point VoidSpark at it. After adding a repo, open{" "}
+                <span className="font-medium text-[#faf9f6]/55">Settings</span> to paste your Vast.ai
+                GPU box SSH command.
+              </p>
+            </div>
+          </section>
+        ) : hasProject ? (
+        <>
 
         {/* ================= SECTION 1 · IDEAS ================= */}
         <section className="mt-12 w-full max-w-4xl">
@@ -2645,7 +2855,7 @@ export default function LaunchCodexPage() {
                       aria-hidden
                     />
                   )}
-                  {autorunBusy ? "Saving" : autorunOn ? "Autorun" : "Manual"}
+                  {autorunBusy ? "Saving" : autorunOn ? "GPU drainer on" : "GPU drainer off"}
                 </button>
               )}
               {/* Manual single-run only makes sense when autorun is off — when
@@ -3269,6 +3479,8 @@ export default function LaunchCodexPage() {
             </>
           )}
         </section>
+        </>
+        ) : null}
       </div>
 
         <MarkdownPanel

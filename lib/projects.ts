@@ -23,26 +23,40 @@ export type Project = {
 const REGISTRY_PATH = join(process.cwd(), 'projects.json');
 const ACTIVE_PATH = join(process.cwd(), '.active-project');
 
-// Always-present fallback so a fresh checkout works before projects.json exists.
-const DEFAULT_PROJECT: Project = {
-  id: 'llm-research-kit',
-  name: 'LLM Research Kit (universe-lm)',
-  repoPath: RESEARCH_REPO_DIR,
-};
+// Optional env seed so `VOIDSPARK_TARGET_REPO=/path npm run dev` works without
+// touching the registry. When unset (RESEARCH_REPO_DIR === ''), a fresh clone
+// has NO projects — the dashboard shows the onboarding card until the user adds
+// one, so no machine-specific path ships in the repo.
+const ENV_PROJECT: Project | null = RESEARCH_REPO_DIR
+  ? { id: 'env', name: 'Target repo (VOIDSPARK_TARGET_REPO)', repoPath: RESEARCH_REPO_DIR }
+  : null;
 
 function readRegistrySync(): Project[] {
+  let registry: Project[] = [];
   try {
     const raw = readFileSync(REGISTRY_PATH, 'utf8');
     const parsed = JSON.parse(raw);
     const list: Project[] = Array.isArray(parsed) ? parsed : parsed.projects;
-    const clean = (list ?? []).filter(
+    registry = (list ?? []).filter(
       (p): p is Project =>
         !!p && typeof p.id === 'string' && typeof p.repoPath === 'string'
     );
-    return clean.length > 0 ? clean : [DEFAULT_PROJECT];
   } catch {
-    return [DEFAULT_PROJECT];
+    registry = [];
   }
+  // Seed the env project first (if set and not already registered) so it's the
+  // default active one on a fresh checkout that exported VOIDSPARK_TARGET_REPO.
+  if (ENV_PROJECT && !registry.some((p) => p.repoPath === ENV_PROJECT.repoPath)) {
+    return [ENV_PROJECT, ...registry];
+  }
+  return registry;
+}
+
+// Whether any project is configured. Routes that auto-poll on page load use
+// this to short-circuit cleanly during the empty-registry onboarding state
+// instead of reading from a relative/empty path.
+export function hasActiveRepo(): boolean {
+  return getActiveRepoDir() !== '';
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -63,7 +77,9 @@ export function getActiveRepoDir(): string {
     /* fall back to first */
   }
   const match = projects.find((p) => p.id === activeId);
-  return (match ?? projects[0] ?? DEFAULT_PROJECT).repoPath;
+  // Empty string when no project is configured (fresh clone) — callers/routes
+  // treat this as the onboarding state.
+  return (match ?? projects[0])?.repoPath ?? '';
 }
 
 export async function getActiveProjectId(): Promise<string> {
@@ -74,7 +90,7 @@ export async function getActiveProjectId(): Promise<string> {
   } catch {
     /* fall back */
   }
-  return projects[0]?.id ?? DEFAULT_PROJECT.id;
+  return projects[0]?.id ?? '';
 }
 
 export async function setActiveProject(id: string): Promise<boolean> {
@@ -194,5 +210,5 @@ async function getActiveProjectIdRaw(): Promise<string> {
   } catch {
     /* fall back */
   }
-  return projects[0]?.id ?? DEFAULT_PROJECT.id;
+  return projects[0]?.id ?? '';
 }

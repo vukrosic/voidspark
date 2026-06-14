@@ -9,14 +9,19 @@ const TMUX_BIN = ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmu
   (p) => existsSync(p)
 ) ?? 'tmux';
 
-export const RESEARCH_REPO_DIR = '/Users/vukrosic/my-life/llm-research-kit-scaling';
+// The target research repo VoidSpark drives, when no project is configured in
+// the registry yet. Set VOIDSPARK_TARGET_REPO in .env.local, or add a repo from
+// the dashboard onboarding card. Empty by default so a fresh clone carries no
+// machine-specific path — see lib/projects.ts for the active-repo resolution.
+export const RESEARCH_REPO_DIR = process.env.VOIDSPARK_TARGET_REPO ?? '';
 
 // Generic agent launcher: takes <session> <agent-cmd> <prompt> and types
 // `<agent-cmd> "$(cat prompt)"` into a detached tmux session. The runner is no
-// longer hardcoded — pick an agent via AGENTS below.
+// longer hardcoded — pick an agent via AGENTS below. Ships vendored in scripts/
+// so a fresh clone works without the author's ~/.agents skills; override with
+// AGENT_LAUNCHER.
 const LAUNCHER =
-  process.env.AGENT_LAUNCHER ??
-  '/Users/vukrosic/.agents/skills/launch-codex-tmux/scripts/launch_agent.sh';
+  process.env.AGENT_LAUNCHER ?? `${process.cwd()}/scripts/launch_agent.sh`;
 
 // ---- Agents -----------------------------------------------------------------
 // Each agent is just a command prefix; the prompt is appended as a final quoted
