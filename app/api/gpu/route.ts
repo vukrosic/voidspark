@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { promisify } from 'util';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
 const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
@@ -38,6 +38,9 @@ function section(out: string, name: string): string {
 }
 
 export async function POST() {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let box: RemoteBox = {};
   try {
     box = JSON.parse(await readFile(REMOTE_BOX_PATH(), 'utf8'));

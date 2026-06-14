@@ -4,7 +4,7 @@ import { openSync } from 'fs';
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import { getAutorunAgent, setAutorun } from '@/lib/autorun';
 import { getRunnerExtra, renderRunnerExtra } from '@/lib/runnerExtra';
 
@@ -109,6 +109,9 @@ async function runnerPrompt(): Promise<string> {
 // already alive, and there is actually needs-run work — so the UI poll keeps the
 // queue draining without ever stacking two runners.
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let body: { enabled?: unknown; agent?: unknown } = {};
   try {
     body = await req.json();

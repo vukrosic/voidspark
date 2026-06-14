@@ -1,7 +1,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 
 const execFileAsync = promisify(execFile);
 const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh');
@@ -12,6 +12,9 @@ const FLIP_SH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'flip.sh')
 const ALLOWED_STATUSES = new Set(['needs-taste', 'needs-run', 'needs-review']);
 
 export async function POST(req: Request) {
+  if (!hasActiveRepo()) {
+    return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
+  }
   let slug = '';
   let status = '';
   let note = '';
