@@ -31,6 +31,8 @@ const INTERVAL = 60; // seconds between refreshes
 
 const promptPath = () =>
   join(getActiveRepoDir(), 'autoresearch', 'monitor-prompt.md');
+const issuesPath = () =>
+  join(getActiveRepoDir(), 'autoresearch', 'monitor-issues.md');
 const summaryPath = () =>
   join(getActiveRepoDir(), 'autoresearch', 'monitor-summary.md');
 const loopScript = () => join(process.cwd(), 'scripts', 'monitor_loop.sh');
@@ -43,6 +45,7 @@ const DEFAULT_PROMPT = `You are the ResearchLoop MONITOR — a read-only watchdo
 
 Gather current state (run these, they are all read-only):
 - \`curl -s http://localhost:3000/api/health/\` — JSON: live gate workers, dead tmux panes, idea pool (inFlight vs floor), throughput (flips/hr, last-flip age), GPU drainer alive, MiniMax quota.
+- \`curl -s -X POST http://localhost:3000/api/gpu-usage/\` — live GPU utilization % + whether a training run (\`arqAlive\`) is active on the box. This is how you tell "GPU idle" (util < 5) from "GPU training" (util 80-100).
 - \`tmux ls\` — every live session (w_<n> = gate workers, lab-autorun = GPU drainer, lab-implement-* = implementers).
 - If the health JSON shows needs-run > 0 but the GPU drainer looks idle, peek at the drainer: \`tmux capture-pane -t lab-autorun -p | tail -15\` to see what it is doing (e.g. stuck syncing files vs actually training).
 
@@ -66,6 +69,19 @@ Any error visible in pane tails or logs (quote it briefly). "none seen" if clean
 ## Numbers
 inFlight / needs-run · flips last hr · last flip Xago · MiniMax % left.`;
 
+// Editable issue checklist. Appended to the prompt each tick (see monitor_loop.sh)
+// so the agent evaluates each rule against live state and reports the ones that
+// are TRUE. The user maintains this list from the panel; these are the defaults.
+const DEFAULT_ISSUES = `- GPU IDLE WITH WORK QUEUED: GPU utilization < 5% (from /api/gpu-usage) for what looks like > 30s while needs-run > 0. The box is paid-for and idle while runs wait — flag loudly with what the drainer is doing instead.
+- DRAINER DOWN: needs-run > 0 but the lab-autorun session is missing, or autorun is off.
+- STUCK RUNNING: an idea has status \`running\` but no live training on the box (arqAlive false / GPU idle) — likely a lost or SSH-throttled run that never flipped to needs-recode.
+- WORKER STUCK: any gate worker (w_<n>) has held its lock > 7 minutes.
+- LOOP STALLED: no status flip in > 15 minutes while autopilot/autoresearch is ON.
+- DEAD PANES: any w_<n> tmux session exists with no live worker lock (zombie pane).
+- MINIMAX EXHAUSTED: MiniMax interval quota at/near 0% — agents are falling back to Codex.
+- IDEA POOL LOW: inFlight < floor (5) but the miner (lab-generate-ideas) is not running.
+- ERRORS: any error, exception, traceback, or "Connection closed"/SSH-throttle message in a pane tail or recent log — quote it.`;
+
 async function sessionAlive(): Promise<boolean> {
   try {
     await execFileAsync(TMUX_BIN, ['has-session', '-t', SESSION], { timeout: 5_000 });
@@ -80,6 +96,14 @@ async function readPrompt(): Promise<string> {
     return await readFile(promptPath(), 'utf8');
   } catch {
     return DEFAULT_PROMPT;
+  }
+}
+
+async function readIssues(): Promise<string> {
+  try {
+    return await readFile(issuesPath(), 'utf8');
+  } catch {
+    return DEFAULT_ISSUES;
   }
 }
 
@@ -100,6 +124,7 @@ async function buildStatus() {
     summary,
     summaryAgeMs,
     prompt: await readPrompt(),
+    issues: await readIssues(),
     interval: INTERVAL,
   };
 }
@@ -126,7 +151,7 @@ async function startSession(): Promise<void> {
 }
 
 export async function POST(req: Request) {
-  let body: { action?: string; prompt?: string } = {};
+  let body: { action?: string; prompt?: string; issues?: string } = {};
   try {
     body = await req.json();
   } catch {
@@ -136,9 +161,13 @@ export async function POST(req: Request) {
 
   if (action === 'start') {
     if (!(await sessionAlive())) {
-      // Seed the prompt file with the default on first run so the agent has a brief.
+      // Seed the prompt + issue checklist with defaults on first run so the
+      // agent has both a brief and the rules to check.
       if (!existsSync(promptPath())) {
         await writeFile(promptPath(), DEFAULT_PROMPT, 'utf8').catch(() => {});
+      }
+      if (!existsSync(issuesPath())) {
+        await writeFile(issuesPath(), DEFAULT_ISSUES, 'utf8').catch(() => {});
       }
       try {
         await startSession();
@@ -162,6 +191,13 @@ export async function POST(req: Request) {
   if (action === 'save-prompt') {
     if (typeof body.prompt === 'string' && body.prompt.trim()) {
       await writeFile(promptPath(), body.prompt, 'utf8');
+    }
+    return Response.json(await buildStatus(), { status: 200 });
+  }
+
+  if (action === 'save-issues') {
+    if (typeof body.issues === 'string' && body.issues.trim()) {
+      await writeFile(issuesPath(), body.issues, 'utf8');
     }
     return Response.json(await buildStatus(), { status: 200 });
   }

@@ -167,10 +167,13 @@ export async function GET() {
     autorun, // which agent the drainer launches runs with (or null = off)
   };
 
-  // --- idea pool ------------------------------------------------------------
+  // --- idea pool + what's running -------------------------------------------
   let inFlight = 0;
   let needsRun = 0;
   let total = 0;
+  let done = 0;
+  let rejected = 0;
+  const running: string[] = []; // ideas the GPU box is (or should be) training now
   const ideaStatus = await Promise.all(
     dirs.map((d) =>
       readFile(join(ideasDir(), d, 'idea.md'), 'utf8')
@@ -178,11 +181,15 @@ export async function GET() {
         .catch(() => '')
     )
   );
-  for (const status of ideaStatus) {
+  for (let i = 0; i < dirs.length; i++) {
+    const status = ideaStatus[i];
     if (!status) continue;
     total += 1;
-    if (status !== 'done' && status !== 'rejected') inFlight += 1;
+    if (status === 'done') done += 1;
+    else if (status === 'rejected') rejected += 1;
+    else inFlight += 1;
     if (status === 'needs-run') needsRun += 1;
+    if (status === 'running') running.push(dirs[i]);
   }
 
   // --- throughput (flips/hr + staleness) from log.jsonl ts ------------------
@@ -212,13 +219,15 @@ export async function GET() {
     })
   );
 
-  // --- best result so far ---------------------------------------------------
+  // --- records: best so far, how many, and how long since the last one ------
   let best: { val: number; idea: string } | null = null;
+  let recordCount = 0;
+  let lastRecordAgeMs: number | null = null;
   try {
     const raw = await readFile(recordsPath(), 'utf8');
-    for (const line of raw.split('\n')) {
-      const t = line.trim();
-      if (!t) continue;
+    const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+    recordCount = lines.length;
+    for (const t of lines) {
       try {
         const j = JSON.parse(t);
         if (typeof j.val === 'number' && (best === null || j.val < best.val)) {
@@ -227,6 +236,13 @@ export async function GET() {
       } catch {
         /* skip */
       }
+    }
+    // records.jsonl is append-only — its mtime is when the last record landed.
+    try {
+      const m = await stat(recordsPath());
+      if (recordCount > 0) lastRecordAgeMs = now - m.mtimeMs;
+    } catch {
+      /* no file */
     }
   } catch {
     /* no records yet */
@@ -238,11 +254,12 @@ export async function GET() {
     flags: { autopilot, autorun, autoimplement },
     workers: { live, dead },
     gpu,
-    ideas: { inFlight, needsRun, total, floor: FLOOR, ceiling: CEILING },
+    ideas: { inFlight, needsRun, total, done, rejected, running, floor: FLOOR, ceiling: CEILING },
     throughput: {
       flipsLastHour,
       lastFlipMs: lastFlipTs ? now - lastFlipTs : null,
     },
     best,
+    records: { count: recordCount, lastRecordAgeMs },
   });
 }

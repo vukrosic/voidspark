@@ -95,12 +95,36 @@ async function listSessions(): Promise<Session[]> {
 // POST-only: this site is built with `output: 'export'`, which rejects
 // dynamic GET route handlers. action: "list" (default) returns the sessions;
 // action: "kill" + name kills a session and returns the updated list.
+const NAME_RE = /^[A-Za-z0-9._-]+$/;
+
 export async function POST(req: Request) {
-  let body: { action?: string; name?: string } = {};
+  let body: { action?: string; name?: string; keys?: string; enter?: boolean } = {};
   try {
     body = await req.json();
   } catch {
     body = {};
+  }
+
+  // Type into a session's pane (the Terminal tab's input). `keys` is sent
+  // literally (-l) so it's never interpreted as a tmux key name; `enter` (default
+  // true) presses Return after, so a line of input is submitted to whatever is
+  // reading stdin in the pane. Lets the user drive any tmux session from the UI.
+  if (body.action === 'send') {
+    if (!body.name || !NAME_RE.test(body.name)) {
+      return Response.json({ success: false, error: 'invalid session name' }, { status: 400 });
+    }
+    try {
+      if (body.keys) {
+        await execFileAsync(TMUX_BIN, ['send-keys', '-t', body.name, '-l', body.keys], { timeout: 8_000 });
+      }
+      if (body.enter !== false) {
+        await execFileAsync(TMUX_BIN, ['send-keys', '-t', body.name, 'Enter'], { timeout: 8_000 });
+      }
+      return Response.json({ success: true, name: body.name }, { status: 200 });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return Response.json({ success: false, name: body.name, error: message }, { status: 200 });
+    }
   }
 
   if (body.action === 'kill') {

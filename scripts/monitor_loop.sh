@@ -14,6 +14,7 @@ set -uo pipefail
 REPO="${1:?usage: monitor_loop.sh <repo-dir> [interval]}"
 INTERVAL="${2:-60}"
 PROMPT="$REPO/autoresearch/monitor-prompt.md"
+ISSUES="$REPO/autoresearch/monitor-issues.md"
 OUT="$REPO/autoresearch/monitor-summary.md"
 
 cd "$REPO" || { echo "[monitor] cannot cd $REPO"; exit 1; }
@@ -22,10 +23,21 @@ echo "[monitor] watching $REPO every ${INTERVAL}s — started $(date -u +%FT%TZ)
 while true; do
   if [ -f "$PROMPT" ]; then
     echo "[monitor] refresh $(date -u +%FT%TZ) …"
+    # Build the per-tick prompt: the base brief + the editable issue checklist.
+    # Rebuilt every tick, so edits to either file take effect on the next refresh
+    # ("injected at the start, re-applied when updated"). The checklist header
+    # tells the agent to evaluate each rule and report only the ones now TRUE.
+    full="$(cat "$PROMPT")"
+    if [ -f "$ISSUES" ]; then
+      full="$full
+
+## ISSUE CHECKLIST — evaluate EACH rule below against the current state. In your report add a \"## Issues\" section listing ONLY the rules that are TRUE right now (with the concrete evidence), or \"none\" if all clear:
+$(cat "$ISSUES")"
+    fi
     # Print mode (`-p`) emits the agent's final summary text to stdout; </dev/null
     # gives an immediate stdin EOF. Write to a temp file and only swap it in on a
     # non-empty success, so a failed/rate-limited tick keeps the last good summary.
-    if claude-minimax-free -p "$(cat "$PROMPT")" < /dev/null > "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
+    if claude-minimax-free -p "$full" < /dev/null > "$OUT.tmp" 2>/dev/null && [ -s "$OUT.tmp" ]; then
       mv "$OUT.tmp" "$OUT"
       echo "[monitor] summary updated ($(wc -l < "$OUT" | tr -d ' ') lines)"
     else
