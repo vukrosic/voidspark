@@ -24,9 +24,26 @@ export type AgentId = 'minimax' | 'codex';
 // the user can attach and watch). `headlessCmd` runs the task to completion and
 // then *exits the process* (claude `-p` print mode / `codex exec`), so the tmux
 // pane closes by itself. Headless is the default; see launchCodexWithText opts.
-export type AgentDef = { id: AgentId; label: string; cmd: string; headlessCmd: string };
+//
+// `fallback` (headless only): if this agent's process exits non-zero OR prints a
+// token-exhaustion marker, the SAME prompt is automatically re-run with the
+// fallback agent in the same tmux pane. See buildFallbackCommand below.
+export type AgentDef = {
+  id: AgentId;
+  label: string;
+  cmd: string;
+  headlessCmd: string;
+  fallback?: AgentId;
+};
 
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.4-mini';
+
+// Shell script that runs the primary agent and live-kills it on a rate-limit /
+// out-of-tokens marker, then re-runs the prompt with the fallback. See
+// scripts/agent_with_fallback.sh for the detection details.
+const FALLBACK_SCRIPT =
+  process.env.AGENT_FALLBACK_SCRIPT ??
+  `${process.cwd()}/scripts/agent_with_fallback.sh`;
 
 export const AGENTS: Record<AgentId, AgentDef> = {
   // Default. `cmf` in the user's shell — Claude Code routed to MiniMax-M3.
@@ -55,6 +72,24 @@ export const AGENTS: Record<AgentId, AgentDef> = {
     headlessCmd: `codex exec -m ${CODEX_MODEL} --dangerously-bypass-approvals-and-sandbox`,
   },
 };
+
+// MiniMax is the cheap default but runs out of tokens; auto-fall back to Codex.
+AGENTS.minimax.fallback = 'codex';
+
+/**
+ * Build the AGENT_CMD that runs `primaryCmd` with `fallbackCmd` as a live
+ * rate-limit fallback, via scripts/agent_with_fallback.sh.
+ *
+ * launch_agent.sh appends the prompt as a single trailing positional arg
+ * (`<AGENT_CMD> "$(cat promptfile)"`), so the script receives:
+ *   agent_with_fallback.sh '<primary>' '<fallback>' '<prompt>'
+ * Each command is single-quoted here so the tmux pane shell keeps it as ONE
+ * arg (neither contains a single quote). The script itself handles tree-killing
+ * MiniMax the instant it rate-limits, instead of waiting out its 10 retries.
+ */
+function buildFallbackCommand(primaryCmd: string, fallbackCmd: string): string {
+  return `${FALLBACK_SCRIPT} '${primaryCmd}' '${fallbackCmd}'`;
+}
 
 export const DEFAULT_AGENT: AgentId = 'minimax';
 
@@ -104,7 +139,15 @@ export async function launchCodexWithText(
 ): Promise<LaunchResult> {
   const def = resolveAgent(agent);
   const headless = opts.headless ?? true;
-  const cmd = headless ? def.headlessCmd : def.cmd;
+  let cmd = headless ? def.headlessCmd : def.cmd;
+
+  // Headless agents with a configured fallback get wrapped so a token-exhausted
+  // / failed run silently retries the same prompt with the fallback agent. The
+  // wrapper consumes the prompt as `$1`, so launch_agent.sh's trailing
+  // `"$(cat promptfile)"` is forwarded to whichever agent ends up running.
+  if (headless && def.fallback && def.fallback in AGENTS) {
+    cmd = buildFallbackCommand(cmd, AGENTS[def.fallback].headlessCmd);
+  }
 
   // Post-command: only meaningful headless (interactive agents hold the shell,
   // so anything appended here would never run). Run onExit, then self-kill.

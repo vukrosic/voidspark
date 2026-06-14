@@ -1,13 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Lightbulb, LoaderCircle, Minus, Plus, RefreshCw, Settings2, Sparkles, Zap } from "lucide-react";
 import { MarkdownPanel } from "@/components/markdown-panel";
 import AnalyticsView from "@/components/analytics-view";
+import DocumentationView from "@/components/documentation-view";
+import ResearchRecords, { type RecordsData } from "@/components/research-records";
 
 // Which top-level view the sidebar is showing. "home" is the main dashboard
-// (ideas + GPU + finished); "analytics" is the stage-timing view. Clicking the
-// VoidSpark wordmark always returns to "home".
-type View = "home" | "analytics";
+// (ideas + GPU + finished); "analytics" is the stage-timing view;
+// "documentation" surfaces the hand-written .md files. Clicking the VoidSpark
+// wordmark always returns to "home".
+type View = "home" | "analytics" | "documentation";
 
 type Session = {
   name: string;
@@ -30,6 +34,7 @@ type Idea = {
   status: string;
   plain: string;
   updated: string;
+  created: number | null; // epoch ms first mined; drives the "added Xago" label
   path: string;
   evidencePath: string | null;
   result: Result | null;
@@ -77,7 +82,8 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
   implementing: { label: "Implementing", cls: "border-emerald-300/25 bg-emerald-300/10 text-emerald-200/90" },
   "needs-run": { label: "Queued · GPU", cls: "border-cyan-300/25 bg-cyan-300/10 text-cyan-200/90" },
   running: { label: "Running · GPU", cls: "border-sky-300/40 bg-sky-300/15 text-sky-100" },
-  "needs-recode": { label: "Fixing · failed run", cls: "border-orange-300/25 bg-orange-300/10 text-orange-200/90" },
+  "needs-recode": { label: "Fixing", cls: "border-orange-300/25 bg-orange-300/10 text-orange-200/90" },
+  recoding: { label: "Fixing", cls: "border-orange-300/25 bg-orange-300/10 text-orange-200/90" },
   "needs-review": { label: "Review", cls: "border-violet-300/25 bg-violet-300/10 text-violet-200/90" },
   done: { label: "Done", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/70" },
   rejected: { label: "Rejected", cls: "border-red-300/25 bg-red-300/5 text-red-200/80" },
@@ -116,11 +122,28 @@ function statusMeta(s: string): { label: string; cls: string } {
 }
 
 // "3s" / "2m 5s" — compact relative age for freshness labels.
+// Compact, low-jitter duration. Seconds only under a minute (live feedback on
+// fresh work); minutes-only up to an hour (no twitchy trailing seconds); then
+// "Hh Mm". Easy to read at a glance — "32m", "2h 5m" — not "32m 14s" ticking.
+// GPU utilization (%) at or below which the box counts as doing no work. An
+// idle 3060 reads ~0%; training pins it to 80–100%, so a small floor cleanly
+// separates "idle" from "training" without flapping on dips between steps.
+const GPU_IDLE_UTIL = 5;
+// Don't surface a momentary idle blip — only show the "gpu idle" timer once the
+// box has been idle continuously for at least this long.
+const GPU_IDLE_MIN_MS = 5_000;
+// The GPU box gets a second, more explicit idle timer in the UI, but only after
+// it's been idle long enough to matter. That keeps brief pauses from blinking
+// in and out of the card.
+const GPU_IDLE_BOX_MIN_MS = 10_000;
+
 function formatAgo(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s`;
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
 }
 
 // Statuses that mean an experiment is finished — they show the full training
@@ -155,6 +178,19 @@ export default function LaunchCodexPage() {
   // (server-side, via run-done). Mirrors a persisted flag; reflects real state.
   const [autorunOn, setAutorunOn] = useState<boolean>(false);
   const [autorunBusy, setAutorunBusy] = useState<boolean>(false);
+
+  // Autopilot: when on, the app poll ticks /api/orchestrate — it runs the gate
+  // orchestrator (reviews/revises/recodes stuck ideas) and refills the idea pool
+  // when it drops below the floor. Enabling it also turns on autorun so the GPU
+  // queue drains too — one switch runs the whole pipeline.
+  const [autopilotOn, setAutopilotOn] = useState<boolean>(false);
+  const [autopilotBusy, setAutopilotBusy] = useState<boolean>(false);
+  const [autopilotInfo, setAutopilotInfo] = useState<{
+    inFlight: number;
+    needsRun: number;
+    floor: number;
+    ceiling: number;
+  } | null>(null);
   // Free-text instructions appended to the GPU runner agent's prompt (e.g. a
   // one-off Vast.ai bash command). Persisted server-side via /api/runner-extra.
   const [runnerExtra, setRunnerExtra] = useState<string>("");
@@ -198,6 +234,11 @@ export default function LaunchCodexPage() {
   );
   const [runnerExtraOpen, setRunnerExtraOpen] = useState<boolean>(false);
   const [showAllFinished, setShowAllFinished] = useState<boolean>(false);
+  // Record timeline + closed/rejected ledger, derived from closed.md +
+  // baseline-cache.json (one fetch, shared by the timeline and the merged
+  // "All experiments" section). `expFilter` drives the verdict chips.
+  const [recordsApi, setRecordsApi] = useState<RecordsData | null>(null);
+  const [expFilter, setExpFilter] = useState<"all" | "win" | "null" | "reject">("all");
   const [gpuQueueExpanded, setGpuQueueExpanded] = useState<boolean>(false);
   // Ids we've already auto-requeued this stale-episode, so the self-healing
   // effect fires once per stuck run (not every tick). Cleared when a run leaves
@@ -220,6 +261,11 @@ export default function LaunchCodexPage() {
   // took — so the UI can show how far behind the compute/VRAM numbers are.
   const [gpuUsageAt, setGpuUsageAt] = useState<number | null>(null);
   const [gpuUsageLatencyMs, setGpuUsageLatencyMs] = useState<number | null>(null);
+  // Epoch ms the GPU first went idle (util < GPU_IDLE_UTIL) in the current idle
+  // stretch, or null while it's working. Set in the poll, counted up live by the
+  // 1s `now` ticker → "idle Ns since last busy". Lets the operator spot a box
+  // doing no work, and resets as soon as utilization turns nontrivial again.
+  const [gpuIdleSince, setGpuIdleSince] = useState<number | null>(null);
   // Whether the remote training tmux (`arq`) is alive right now — only true
   // while a run is active. Drives the "Attach GPU" button.
   const [arqAlive, setArqAlive] = useState(false);
@@ -234,6 +280,14 @@ export default function LaunchCodexPage() {
     Record<string, { text: string; alive: boolean; at: number }>
   >({});
   const logInFlight = useRef<Set<string>>(new Set());
+  // One <pre> ref per session name so we can auto-scroll the right log panel
+  // when its content updates. Storing in a ref (not state) avoids re-renders
+  // when refs are registered/unregistered.
+  const logRefs = useRef<Map<string, HTMLPreElement>>(new Map());
+  const setLogRef = (name: string) => (el: HTMLPreElement | null) => {
+    if (el) logRefs.current.set(name, el);
+    else logRefs.current.delete(name);
+  };
 
   const refreshSessions = useCallback(async () => {
     try {
@@ -266,6 +320,24 @@ export default function LaunchCodexPage() {
       setIdeas(data.ideas);
     } catch {
       setIdeaLoadError("Failed to refresh ideas");
+    }
+  }, []);
+
+  const refreshRecords = useCallback(async () => {
+    try {
+      const res = await fetch("/api/research-records/", { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      if (!d?.success) return;
+      setRecordsApi({
+        records: Array.isArray(d.records) ? d.records : [],
+        archivedRecords: Array.isArray(d.archivedRecords) ? d.archivedRecords : [],
+        closed: Array.isArray(d.closed) ? d.closed : [],
+        counts: d.counts ?? {},
+        bestVal: d.bestVal ?? null,
+        baseline: d.baseline ?? null,
+      });
+    } catch {
+      /* non-fatal — the results sections just stay on their last state */
     }
   }, []);
 
@@ -306,14 +378,20 @@ export default function LaunchCodexPage() {
       const data = await response.json().catch(() => ({}));
       setGpuUsageLatencyMs(Date.now() - startedAt);
       if (data.success) {
+        const util = Number(data.utilization) || 0;
         setGpuUsage({
           name: data.name ?? "",
-          utilization: Number(data.utilization) || 0,
+          utilization: util,
           memUsed: Number(data.memUsed) || 0,
           memTotal: Number(data.memTotal) || 0,
         });
         setGpuUsageStale(false);
         setGpuUsageAt(Date.now());
+        // Open an idle stretch the first poll util drops low; close it the
+        // moment work resumes. Keeps the existing start time while still idle.
+        setGpuIdleSince((prev) =>
+          util < GPU_IDLE_UTIL ? prev ?? Date.now() : null
+        );
       } else {
         setGpuUsageStale(true);
       }
@@ -379,12 +457,14 @@ export default function LaunchCodexPage() {
   useEffect(() => {
     refreshSessions();
     refreshIdeas();
+    refreshRecords();
     const interval = setInterval(() => {
       refreshSessions();
       refreshIdeas();
+      refreshRecords();
     }, 5000);
     return () => clearInterval(interval);
-  }, [refreshSessions, refreshIdeas]);
+  }, [refreshSessions, refreshIdeas, refreshRecords]);
 
   // Autorun: a bodyless POST reports state AND drives one tick — it re-invokes
   // the single lab-autorun runner agent (which drains the whole needs-run queue
@@ -403,6 +483,33 @@ export default function LaunchCodexPage() {
     };
     tick();
     const interval = setInterval(tick, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Autopilot: a bodyless POST reports state AND drives one orchestrator tick
+  // when it's on (reclaim stale locks, fan out gate workers, refill when low).
+  // Slower cadence (20s) than autorun — each tick may spawn cmf workers and
+  // orchestrate.sh is heavier; it self-guards against stacking duplicates.
+  useEffect(() => {
+    const tick = () => {
+      fetch("/api/orchestrate/", { method: "POST" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d || typeof d.enabled !== "boolean") return;
+          setAutopilotOn(d.enabled);
+          setAutopilotInfo({
+            inFlight: d.inFlight ?? 0,
+            needsRun: d.needsRun ?? 0,
+            floor: d.floor ?? 5,
+            ceiling: d.ceiling ?? 20,
+          });
+        })
+        .catch(() => {
+          /* default off */
+        });
+    };
+    tick();
+    const interval = setInterval(tick, 20000);
     return () => clearInterval(interval);
   }, []);
 
@@ -504,6 +611,21 @@ export default function LaunchCodexPage() {
     return () => clearInterval(interval);
   }, [expandedLogs, fetchLog]);
 
+  // Auto-scroll each expanded log panel to its tail on every content update
+  // — but only when the user is already near the bottom (≤32px gap). If they
+  // scrolled up to read older lines, we leave them alone so we don't yank
+  // them away mid-read. Manual scroll back to the bottom re-arms the follow.
+  useEffect(() => {
+    for (const name of expandedLogs) {
+      const el = logRefs.current.get(name);
+      if (!el) continue;
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (distanceFromBottom <= 32) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+  }, [logData, expandedLogs]);
+
   // While an idea is marked `running`, poll the GPU box so the panel stays live.
   // When nothing is running we don't SSH on a timer — refresh on demand instead.
   const hasRunningIdea = ideas.some((idea) => idea.status === "running");
@@ -513,6 +635,18 @@ export default function LaunchCodexPage() {
     const interval = setInterval(refreshGpu, 10000);
     return () => clearInterval(interval);
   }, [hasRunningIdea, refreshGpu]);
+
+  // Auto-dismiss the "Generating ideas in tmux session …" toast after a few
+  // seconds so the page doesn't keep showing a stale success message. Errors
+  // use the same state but deserve a longer dwell — fall back to the
+  // success timeout when the message is short, give errors more time.
+  useEffect(() => {
+    if (!generateMessage) return;
+    const isError = generateMessage.startsWith("✗");
+    const ttl = isError ? 8_000 : 4_000;
+    const timer = setTimeout(() => setGenerateMessage(""), ttl);
+    return () => clearTimeout(timer);
+  }, [generateMessage]);
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -611,6 +745,49 @@ export default function LaunchCodexPage() {
       setRunMessage("Failed to toggle autorun");
     } finally {
       setAutorunBusy(false);
+      refreshSessions();
+      refreshIdeas();
+    }
+  };
+
+  // Flip autopilot on/off. Enabling drives the gate pipeline AND turns on autorun
+  // so the GPU queue drains too — one switch runs the whole loop end to end.
+  const handleToggleAutopilot = async () => {
+    const next = !autopilotOn;
+    setAutopilotBusy(true);
+    try {
+      const response = await fetch("/api/orchestrate/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next, agent }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && typeof data.enabled === "boolean") {
+        setAutopilotOn(data.enabled);
+        setRunMessage(
+          data.enabled
+            ? "Autopilot on — pipeline self-runs: gates advance, ideas refill, GPU drains."
+            : "Autopilot off."
+        );
+        // Keep the GPU side in lockstep: enabling autopilot enables autorun,
+        // disabling leaves autorun as-is (the user can stop the GPU separately).
+        if (data.enabled && !autorunOn) {
+          await fetch("/api/autorun/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: true, agent, headless }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+              if (d && typeof d.enabled === "boolean") setAutorunOn(d.enabled);
+            })
+            .catch(() => {});
+        }
+      }
+    } catch {
+      setRunMessage("Failed to toggle autopilot");
+    } finally {
+      setAutopilotBusy(false);
       refreshSessions();
       refreshIdeas();
     }
@@ -927,6 +1104,15 @@ export default function LaunchCodexPage() {
     return Number.isFinite(t) ? formatAgo(now - t) : null;
   };
 
+  // The same flip moment as a wall-clock time in the viewer's LOCAL timezone
+  // (toLocaleTimeString defaults to the browser's zone). Used for the hover
+  // tooltip on the elapsed-time labels, so "32m" also tells you it started at
+  // "3:42:10 AM your time".
+  const localTime = (iso: string): string => {
+    const t = Date.parse(iso);
+    return Number.isFinite(t) ? new Date(t).toLocaleTimeString() : "";
+  };
+
   // Join: which ideas have a live implement/run session right now.
   const liveSessions = new Set(sessions.map((s) => s.name));
   const queuedIdeas = ideas
@@ -1006,9 +1192,27 @@ export default function LaunchCodexPage() {
     ideas
       .filter((i) => statuses.includes(i.status))
       .sort((a, b) => (a.updated || a.id).localeCompare(b.updated || b.id));
-  const ideaGroups: { key: string; label: string; ideas: Idea[] }[] = [
+  // Keep brand-new implementation separate from failed-run bug-fixing — they
+  // look identical otherwise but mean very different things ("building the idea"
+  // vs "a GPU run broke and we're debugging it"). The fixing group gets an
+  // orange tone so recovery work is visually obvious.
+  // The code-implementer reuses the `implementing` status when it CLAIMS a
+  // failed (`needs-recode`) idea, so a fresh build and a post-failure retry look
+  // identical by status alone. The tell: a retry already carries a prior A/B
+  // result (the run that failed). Route those to "Fixing failed runs" so a brand
+  // new idea is never shown next to a stale FAILED number.
+  const isRetry = (i: Idea) => i.status === "implementing" && i.result != null;
+  const fixingIdeas = ideas
+    .filter((i) => i.status === "needs-recode" || i.status === "recoding" || isRetry(i))
+    .sort((a, b) => (a.updated || a.id).localeCompare(b.updated || b.id));
+  const ideaGroups: { key: string; label: string; ideas: Idea[]; tone?: "warn" }[] = [
     { key: "proposed", label: "Proposed", ideas: byStatus("needs-taste") },
-    { key: "implementing", label: "Implementing", ideas: byStatus("implementing", "needs-recode", "recoding") },
+    {
+      key: "implementing",
+      label: "Implementing new ideas",
+      ideas: byStatus("implementing").filter((i) => !isRetry(i)),
+    },
+    { key: "fixing", label: "Fixing failed runs", ideas: fixingIdeas, tone: "warn" },
     { key: "review", label: "In review", ideas: byStatus("needs-review") },
   ];
   // Anything not finished, not on the GPU, and not in a named bucket above —
@@ -1032,7 +1236,51 @@ export default function LaunchCodexPage() {
   const finishedIdeas = ideas
     .filter((i) => FINISHED_STATUSES.has(i.status))
     .sort((a, b) => (b.updated || b.id).localeCompare(a.updated || a.id));
-  const finishedPreview = showAllFinished ? finishedIdeas : finishedIdeas.slice(0, 5);
+
+  // ---- Merged "All experiments" ledger (was Finished + Closed/failed) --------
+  // One section, two data sources, deduped by slug:
+  //   • ran ideas (finishedIdeas) → rich cards with the verdict + deltas
+  //   • closed.md entries with no ran card → compact rows (archived/never-ran)
+  // Buckets: win (beat baseline), null (no change / diverged), reject (killed
+  // on paper). A ran card always wins over its closed.md row for the same slug.
+  const ideaBucket = (i: Idea): "win" | "null" =>
+    i.result?.verdict?.toUpperCase() === "WIN" ? "win" : "null";
+  const closedBucket = (v: string): "null" | "reject" =>
+    v === "reject" || v === "taste-reject" ? "reject" : "null";
+  const finishedSlugs = new Set(finishedIdeas.map((i) => i.id));
+  const extraClosed = (recordsApi?.closed ?? [])
+    .filter((c) => !finishedSlugs.has(c.slug))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const winCount = finishedIdeas.filter((i) => ideaBucket(i) === "win").length;
+  const nullCount =
+    finishedIdeas.filter((i) => ideaBucket(i) === "null").length +
+    extraClosed.filter((c) => closedBucket(c.verdict) === "null").length;
+  const rejectCount = extraClosed.filter((c) => closedBucket(c.verdict) === "reject").length;
+  const allCount = winCount + nullCount + rejectCount;
+
+  const shownIdeas =
+    expFilter === "reject"
+      ? []
+      : finishedIdeas.filter((i) => expFilter === "all" || ideaBucket(i) === expFilter);
+  const shownClosed =
+    expFilter === "win"
+      ? []
+      : extraClosed.filter((c) => expFilter === "all" || closedBucket(c.verdict) === expFilter);
+  // Preview window over the combined list (ran cards first, then closed rows).
+  const EXP_PREVIEW = 6;
+  const ideaShown = showAllFinished ? shownIdeas : shownIdeas.slice(0, EXP_PREVIEW);
+  const closedBudget = Math.max(0, EXP_PREVIEW - ideaShown.length);
+  const closedShownExp = showAllFinished ? shownClosed : shownClosed.slice(0, closedBudget);
+  const expTotalShown = ideaShown.length + closedShownExp.length;
+  const expTotal = shownIdeas.length + shownClosed.length;
+
+  const EXP_CHIPS: { id: typeof expFilter; label: string; n: number }[] = [
+    { id: "all", label: "All", n: allCount },
+    { id: "win", label: "Wins", n: winCount },
+    { id: "null", label: "No change", n: nullCount },
+    { id: "reject", label: "Rejected", n: rejectCount },
+  ];
 
   // Split the flat tmux list by what each session is for, so idea-generation
   // sessions sit with the Ideas section and GPU-run supervisors with the GPU
@@ -1241,7 +1489,10 @@ export default function LaunchCodexPage() {
                         : "loading…"}
                     </span>
                   </div>
-                  <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-[11px] leading-relaxed text-[#faf9f6]/75">
+                  <pre
+                    ref={setLogRef(session.name)}
+                    className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/40 px-3 py-2 font-mono text-[11px] leading-relaxed text-[#faf9f6]/75"
+                  >
                     {log
                       ? log.text || "(no output captured yet)"
                       : "Loading log…"}
@@ -1266,7 +1517,7 @@ export default function LaunchCodexPage() {
       <dd className="font-mono text-[#faf9f6]/85">{val.toFixed(4)}</dd>
     </>
   );
-  const renderResult = (r: Result) => {
+  const renderResult = (r: Result, stale = false) => {
     const rows: { label: string; val: number | null }[] = [
       { label: "Baseline (ctrl)", val: r.controlVal },
       { label: "Experiment", val: r.treatmentVal },
@@ -1294,10 +1545,14 @@ export default function LaunchCodexPage() {
             : "text-[#faf9f6]/60";
 
     return (
-      <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-3">
+      <div
+        className={`mt-3 rounded-lg border px-3 py-3 ${
+          stale ? "border-white/[0.06] bg-black/10 opacity-60" : "border-white/10 bg-black/20"
+        }`}
+      >
         <div className="mb-2 flex items-center justify-between">
           <span className="text-[10px] uppercase tracking-[0.2em] text-[#faf9f6]/40">
-            A/B result
+            {stale ? "Previous run — re-coding a fix" : "A/B result"}
           </span>
           <span
             title={verdictMeta(verdict).help || verdict}
@@ -1381,10 +1636,10 @@ export default function LaunchCodexPage() {
               )}
               {isTimedStatus(idea.status) && timeInState(idea.updated) && (
                 <span
-                  title="time in this state"
-                  className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[10px] tabular-nums text-[#faf9f6]/55"
+                  title={`in this state for ${timeInState(idea.updated)} · since ${localTime(idea.updated)}`}
+                  className="font-mono text-[10px] tabular-nums text-[#faf9f6]/40"
                 >
-                  ⏱ {timeInState(idea.updated)}
+                  {timeInState(idea.updated)}
                 </span>
               )}
               <span
@@ -1394,6 +1649,14 @@ export default function LaunchCodexPage() {
                 {statusMeta(idea.status).label}
               </span>
             </div>
+            {idea.created != null && (
+              <span
+                title={`first mined ${localTime(new Date(idea.created).toISOString())}`}
+                className="font-mono text-[10px] tabular-nums text-[#faf9f6]/30"
+              >
+                added {formatAgo(now - idea.created)} ago
+              </span>
+            )}
             <div className="flex items-center gap-2">
               {idea.evidencePath && (
                 <button
@@ -1457,7 +1720,7 @@ export default function LaunchCodexPage() {
             </div>
           </div>
         </div>
-        {idea.result && renderResult(idea.result)}
+        {idea.result && renderResult(idea.result, !FINISHED_STATUSES.has(idea.status))}
         {extra}
       </li>
     );
@@ -1467,7 +1730,7 @@ export default function LaunchCodexPage() {
     <div className="flex min-h-screen bg-[#1f1e1d] text-[#faf9f6]">
       {/* Project sidebar — pick which repo the loop drives. Switching re-points
           every agent/API at that repo (its ideas, queue, autorun, GPU box). */}
-      <aside className="hidden w-60 shrink-0 flex-col border-r border-white/10 bg-black/20 px-4 py-6 md:flex">
+      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col overflow-y-auto border-r border-white/10 bg-black/20 px-4 py-6 md:flex">
         <div className="flex items-center justify-between px-1">
           {/* Wordmark doubles as "home" — click to return to the dashboard. */}
           <button
@@ -1490,11 +1753,12 @@ export default function LaunchCodexPage() {
           </button>
         </div>
 
-        {/* Top-level views — home (dashboard) and analytics. */}
+        {/* Top-level views — home (dashboard), analytics, documentation. */}
         <nav className="mt-6 flex flex-col gap-1">
           {([
             { id: "home", label: "Home", icon: "▣" },
             { id: "analytics", label: "Analytics", icon: "📊" },
+            { id: "documentation", label: "Documentation", icon: "📖" },
           ] as { id: View; label: string; icon: string }[]).map((item) => {
             const active = view === item.id;
             return (
@@ -1676,6 +1940,8 @@ export default function LaunchCodexPage() {
 
       {view === "analytics" ? (
         <AnalyticsView onHome={() => setView("home")} />
+      ) : view === "documentation" ? (
+        <DocumentationView onHome={() => setView("home")} />
       ) : (
       <main className="min-h-screen flex-1 bg-[#1f1e1d] pt-10 text-[#faf9f6] md:pt-12">
         <div className="container mx-auto flex min-h-[calc(100vh-12rem)] flex-col items-center px-6 py-10">
@@ -1687,14 +1953,16 @@ export default function LaunchCodexPage() {
               type="button"
               onClick={() => setSettingsOpen((v) => !v)}
               aria-expanded={settingsOpen}
-              className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition focus:outline-none focus:ring-2 focus:ring-white/20 ${
+              className={`inline-flex h-9 items-center gap-2 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 focus:ring-white/20 ${
                 settingsOpen
                   ? "border-white/30 bg-white/[0.08] text-white"
                   : "border-white/12 bg-white/[0.03] text-[#faf9f6]/55 hover:border-white/30 hover:text-white"
               }`}
             >
-              <span aria-hidden>⚙</span>
-              Settings · {AGENT_OPTIONS.find((o) => o.id === agent)?.label ?? agent}
+              <Settings2 className="h-3.5 w-3.5" aria-hidden />
+              <span className="hidden sm:inline">Settings</span>
+              <span className="h-1 w-1 rounded-full bg-[#faf9f6]/30" aria-hidden />
+              <span>{AGENT_OPTIONS.find((o) => o.id === agent)?.label ?? agent}</span>
             </button>
           </div>
 
@@ -1762,20 +2030,22 @@ export default function LaunchCodexPage() {
         </div>
 
         {/* ================= SECTION 1 · IDEAS ================= */}
-        <section className="mt-14 w-full max-w-4xl">
-          <div className="mb-5 flex items-end justify-between gap-3 border-b border-amber-300/20 pb-3">
-            <div className="flex items-center gap-3">
-              <span className="h-7 w-1 rounded-full bg-amber-300/70" />
+        <section className="mt-12 w-full max-w-4xl">
+          <div className="mb-4 flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-amber-300/20 bg-amber-300/[0.06] text-amber-200">
+                <Lightbulb className="h-4 w-4" aria-hidden />
+              </span>
               <div>
-                <h2 className="text-sm font-semibold uppercase tracking-[0.28em] text-amber-200">
+                <h2 className="text-sm font-semibold uppercase tracking-normal text-amber-100">
                   Ideas
                 </h2>
                 <p className="text-[11px] text-[#faf9f6]/40">
-                  Brainstorm ideas, then implement them into a runnable A/B.
+                  Brainstorm to runnable A/B.
                 </p>
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-3">
+            <div className="flex shrink-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={handleToggleAutoImplement}
@@ -1785,38 +2055,45 @@ export default function LaunchCodexPage() {
                     ? "Auto-implement is ON — Proposed ideas get implemented automatically (max 2 at once). Click to stop."
                     : "Auto-implement is OFF. Click to auto-implement Proposed ideas (max 2 at once)."
                 }
-                className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
                   autoImplementOn
                     ? "border-emerald-400/50 bg-emerald-400/15 text-emerald-200 hover:bg-emerald-400/25 focus:ring-emerald-400/40"
                     : "border-white/15 bg-white/[0.04] text-[#faf9f6]/55 hover:border-white/30 hover:text-white focus:ring-white/20"
                 }`}
               >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    autoImplementOn ? "animate-pulse bg-emerald-400" : "bg-[#faf9f6]/40"
-                  }`}
-                />
+                <Zap className={`h-3.5 w-3.5 ${autoImplementOn ? "fill-emerald-300/25" : ""}`} aria-hidden />
                 {autoImplementBusy
-                  ? "…"
+                  ? "Saving"
                   : autoImplementOn
-                    ? "Auto-implement on"
-                    : "Auto-implement off"}
+                    ? "Auto on"
+                    : "Auto off"}
               </button>
               <button
                 type="button"
                 onClick={refreshIdeas}
-                className="shrink-0 text-xs uppercase tracking-[0.2em] text-amber-300/70 transition hover:text-amber-200"
+                aria-label="Refresh ideas"
+                title="Refresh ideas"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-white/10 bg-white/[0.03] text-amber-200/65 transition hover:border-amber-300/30 hover:text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-300/25"
               >
-                Refresh
+                <RefreshCw className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
           </div>
 
           {/* Generate controls + prompt edit links */}
-          <div className="mb-6 flex flex-col items-center gap-3 text-center">
-            <form onSubmit={handleGenerate} className="flex items-center gap-2">
-              <label className="flex items-center gap-1.5 rounded-full border border-amber-300/30 bg-amber-300/5 px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-amber-200/80">
-                <span>How many</span>
+          <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <form onSubmit={handleGenerate} className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <label className="inline-flex h-9 items-center overflow-hidden rounded-md border border-white/10 bg-white/[0.03] text-xs text-[#faf9f6]/60">
+                <span className="px-2.5 font-medium">Count</span>
+                <button
+                  type="button"
+                  onClick={() => setIdeaCount((n) => Math.max(1, n - 1))}
+                  disabled={ideaCount <= 1 || isGenerating}
+                  aria-label="Decrease idea count"
+                  className="flex h-full w-8 items-center justify-center border-l border-white/10 text-[#faf9f6]/45 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+                >
+                  <Minus className="h-3.5 w-3.5" aria-hidden />
+                </button>
                 <input
                   type="number"
                   min={1}
@@ -1826,20 +2103,34 @@ export default function LaunchCodexPage() {
                     const n = Math.round(Number(e.target.value));
                     setIdeaCount(Number.isFinite(n) ? Math.max(1, Math.min(20, n)) : 1);
                   }}
-                  className="w-12 rounded-md border border-amber-300/30 bg-[#1f1e1d] px-1.5 py-1 text-center text-sm font-semibold text-amber-100 focus:outline-none focus:ring-2 focus:ring-amber-300/40"
+                  className="h-full w-11 border-x border-white/10 bg-[#1f1e1d] px-1 text-center text-sm font-semibold text-amber-100 [appearance:textfield] focus:outline-none focus:ring-2 focus:ring-amber-300/35"
                   aria-label="Number of ideas to generate"
                 />
+                <button
+                  type="button"
+                  onClick={() => setIdeaCount((n) => Math.min(20, n + 1))}
+                  disabled={ideaCount >= 20 || isGenerating}
+                  aria-label="Increase idea count"
+                  className="flex h-full w-8 items-center justify-center text-[#faf9f6]/45 transition hover:bg-white/[0.06] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
+                >
+                  <Plus className="h-3.5 w-3.5" aria-hidden />
+                </button>
               </label>
               <button
                 type="submit"
                 disabled={isGenerating}
-                className="rounded-full border border-amber-300/30 bg-amber-300/10 px-8 py-3.5 text-sm font-semibold uppercase tracking-[0.24em] text-amber-200 transition hover:border-amber-300/60 hover:bg-amber-300/20 hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-300/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-amber-300/25 bg-amber-300/[0.08] px-3 text-xs font-semibold text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-300/[0.14] hover:text-white focus:outline-none focus:ring-2 focus:ring-amber-300/35 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isGenerating ? "Generating..." : `Generate ${ideaCount} Idea${ideaCount === 1 ? "" : "s"}`}
+                {isGenerating ? (
+                  <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5" aria-hidden />
+                )}
+                {isGenerating ? "Generating" : `Generate ${ideaCount}`}
               </button>
             </form>
             {generateMessage && (
-              <p className="text-sm text-amber-300">{generateMessage}</p>
+              <p className="text-xs text-amber-300/85 sm:text-right">{generateMessage}</p>
             )}
           </div>
 
@@ -1870,7 +2161,11 @@ export default function LaunchCodexPage() {
                       aria-expanded={expanded}
                       className="mb-2 flex w-full items-center justify-between gap-3 rounded-md px-1 py-1 text-left transition hover:bg-white/[0.03] focus:outline-none focus:ring-2 focus:ring-amber-300/20"
                     >
-                      <span className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-amber-200/50">
+                      <span
+                        className={`flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] ${
+                          group.tone === "warn" ? "text-orange-300/70" : "text-amber-200/50"
+                        }`}
+                      >
                         <span aria-hidden className="font-mono text-[#faf9f6]/30">
                           {expanded ? "−" : "+"}
                         </span>
@@ -1938,6 +2233,32 @@ export default function LaunchCodexPage() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleToggleAutopilot}
+                disabled={autopilotBusy}
+                title={
+                  autopilotOn
+                    ? `Autopilot is ON — the whole pipeline self-runs: stuck gates advance, ideas refill below ${autopilotInfo?.floor ?? 5} (cap ${autopilotInfo?.ceiling ?? 20}), and the GPU drains. Click to stop.`
+                    : "Autopilot is OFF. Click to run the entire pipeline automatically — reviews, fixes, idea generation, and GPU runs."
+                }
+                className={`flex items-center gap-1.5 rounded-full border px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  autopilotOn
+                    ? "border-violet-400/50 bg-violet-400/15 text-violet-200 hover:bg-violet-400/25 focus:ring-violet-400/40"
+                    : "border-white/15 bg-white/[0.04] text-[#faf9f6]/60 hover:border-white/30 hover:text-white focus:ring-white/20"
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    autopilotOn ? "animate-pulse bg-violet-400" : "bg-[#faf9f6]/40"
+                  }`}
+                />
+                {autopilotBusy
+                  ? "…"
+                  : autopilotOn
+                    ? `Autopilot on${autopilotInfo ? ` · ${autopilotInfo.inFlight} in flight` : ""}`
+                    : "Autopilot off"}
+              </button>
               <button
                 type="button"
                 onClick={handleToggleAutorun}
@@ -2018,6 +2339,17 @@ export default function LaunchCodexPage() {
                 {" · "}
                 {liveRunCount} supervisor
                 {" · "}arq {arqAlive ? "live" : "idle"}
+                {gpuUsage && !gpuUsageStale ? ` · gpu ${gpuUsage.utilization}%` : ""}
+                {!gpuUsageStale &&
+                gpuIdleSince != null &&
+                now - gpuIdleSince >= GPU_IDLE_MIN_MS ? (
+                  <span
+                    className="text-orange-300"
+                    title={`GPU has read <${GPU_IDLE_UTIL}% utilization (no work) since ${localTime(new Date(gpuIdleSince).toISOString())}`}
+                  >
+                    {" · "}idle {formatAgo(now - gpuIdleSince)}
+                  </span>
+                ) : null}
                 {gpuUsageStale ? " · telemetry stale" : ""}
               </p>
             </div>
@@ -2149,14 +2481,12 @@ export default function LaunchCodexPage() {
                       <div className="flex shrink-0 items-center gap-2">
                         {timeInState(idea.updated) && (
                           <span
-                            title={
-                              idea.status === "running"
-                                ? "time running"
-                                : "time waiting in queue"
-                            }
+                            title={`${
+                              idea.status === "running" ? "running for" : "waiting in queue for"
+                            } ${timeInState(idea.updated)} · since ${localTime(idea.updated)}`}
                             className="font-mono text-[10px] tabular-nums text-[#faf9f6]/45"
                           >
-                            ⏱ {timeInState(idea.updated)}
+                            {timeInState(idea.updated)}
                           </span>
                         )}
                         {isCurrentRun && (
@@ -2247,6 +2577,18 @@ export default function LaunchCodexPage() {
                   "tmux arq idle (starts when a run is active)"
                 )}
               </p>
+              {!gpuUsageStale &&
+              gpuIdleSince != null &&
+              now - gpuIdleSince >= GPU_IDLE_BOX_MIN_MS ? (
+                <p
+                  className="mt-1 text-xs text-orange-300/80"
+                  title={`GPU has read <${GPU_IDLE_UTIL}% utilization (no work) since ${localTime(
+                    new Date(gpuIdleSince).toISOString()
+                  )}`}
+                >
+                  idle {formatAgo(now - gpuIdleSince)} since last busy
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -2420,50 +2762,107 @@ export default function LaunchCodexPage() {
           {renderSessionList(otherSessions, "No other tmux sessions.")}
         </section>
 
-        {/* ============ SECTION 4 · FINISHED EXPERIMENTS (bottom) ============ */}
-        <section className="mt-16 w-full max-w-2xl">
-          <div className="mb-5 flex items-end justify-between gap-3 border-b border-emerald-300/20 pb-3">
+        {/* ===== SECTION 4 · RECORD TIMELINE (lead of the results view) ===== */}
+        <ResearchRecords data={recordsApi} />
+
+        {/* ===== SECTION 5 · ALL EXPERIMENTS (merged: ran + closed, filtered) ===== */}
+        <section className="mt-12 w-full max-w-2xl">
+          <div className="mb-4 flex items-end justify-between gap-3 border-b border-emerald-300/20 pb-3">
             <div className="flex items-center gap-3">
               <span className="h-7 w-1 rounded-full bg-emerald-300/70" />
               <div>
                 <h2 className="text-sm font-semibold uppercase tracking-[0.28em] text-emerald-200">
-                  Finished experiments
+                  All experiments
                 </h2>
                 <p className="text-[11px] text-[#faf9f6]/40">
-                  Completed A/Bs — verdict and deltas, newest first.
+                  Every A/B and closed idea, newest first. Ran ideas show the full
+                  curve; killed-on-paper ones are one-liners.
                 </p>
               </div>
             </div>
             <span className="shrink-0 text-xs uppercase tracking-[0.2em] text-emerald-300/60">
-              {finishedIdeas.length}
+              {allCount}
             </span>
           </div>
 
-          {finishedIdeas.length === 0 ? (
+          {/* Verdict filter chips */}
+          <div className="mb-4 flex flex-wrap gap-2">
+            {EXP_CHIPS.map((chip) => {
+              const active = expFilter === chip.id;
+              return (
+                <button
+                  key={chip.id}
+                  type="button"
+                  onClick={() => {
+                    setExpFilter(chip.id);
+                    setShowAllFinished(false);
+                  }}
+                  className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] transition focus:outline-none ${
+                    active
+                      ? "border-emerald-300/40 bg-emerald-300/15 text-emerald-100"
+                      : "border-white/10 bg-white/[0.02] text-[#faf9f6]/45 hover:border-white/25 hover:text-[#faf9f6]/75"
+                  }`}
+                >
+                  {chip.label}
+                  <span className="ml-1.5 font-mono tabular-nums opacity-60">{chip.n}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {expTotal === 0 ? (
             <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-sm text-[#faf9f6]/40">
-              No finished experiments yet.
+              Nothing here yet.
             </p>
           ) : (
             <>
               <ul className="space-y-2">
-                {finishedPreview.map((idea) => renderIdeaCard(idea))}
+                {ideaShown.map((idea) => renderIdeaCard(idea))}
+                {closedShownExp.map((c, i) => {
+                  const isReject = closedBucket(c.verdict) === "reject";
+                  return (
+                    <li
+                      key={`closed-${c.slug}-${i}`}
+                      className="rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-medium text-[#faf9f6]/85" title={c.slug}>
+                          {c.slug}
+                        </span>
+                        <span
+                          className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] uppercase tracking-[0.14em] ${
+                            isReject
+                              ? "border-red-300/25 bg-red-300/[0.06] text-red-200/80"
+                              : "border-white/15 bg-white/[0.04] text-[#faf9f6]/55"
+                          }`}
+                        >
+                          {isReject ? "Rejected" : "No change"}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between font-mono text-[10px] tabular-nums text-[#faf9f6]/40">
+                        <span>{c.val != null ? `val ${c.val.toFixed(4)}` : "val —"}</span>
+                        <span>{c.date}</span>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
-              {finishedIdeas.length > finishedPreview.length && (
+              {expTotal > expTotalShown && (
                 <button
                   type="button"
                   onClick={() => setShowAllFinished(true)}
                   className="mt-3 w-full rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/45 transition hover:border-white/20 hover:text-[#faf9f6]/75 focus:outline-none focus:ring-2 focus:ring-emerald-300/20"
                 >
-                  Show {finishedIdeas.length - finishedPreview.length} older experiments
+                  Show {expTotal - expTotalShown} more
                 </button>
               )}
-              {showAllFinished && finishedIdeas.length > 5 && (
+              {showAllFinished && expTotal > EXP_PREVIEW && (
                 <button
                   type="button"
                   onClick={() => setShowAllFinished(false)}
                   className="mt-3 w-full text-xs uppercase tracking-[0.18em] text-[#faf9f6]/35 transition hover:text-[#faf9f6]/65"
                 >
-                  Collapse finished experiments
+                  Collapse
                 </button>
               )}
             </>

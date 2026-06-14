@@ -1,8 +1,33 @@
-import { readFile, readdir } from 'fs/promises';
+import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import { getActiveRepoDir } from '@/lib/projects';
 
 const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+
+// When the idea first appeared, in epoch ms — the `ts` on the FIRST line of its
+// log.jsonl (the mine/seed event), which is the true "added" moment. Falls back
+// to the folder's birthtime if the log is missing/unparseable. null if neither
+// is readable, in which case the UI just omits the "added Xago" label.
+async function minedAt(dir: string): Promise<number | null> {
+  try {
+    const log = await readFile(join(ideasDir(), dir, 'log.jsonl'), 'utf8');
+    const first = log.split('\n').find((l) => l.trim());
+    if (first) {
+      const ts = (JSON.parse(first) as { ts?: string }).ts;
+      const ms = ts ? Date.parse(ts) : NaN;
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    /* no/!parseable log — fall through to birthtime */
+  }
+  try {
+    const s = await stat(join(ideasDir(), dir));
+    const ms = s.birthtimeMs || s.mtimeMs;
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
 
 type Result = {
   verdict: string; // WIN | NULL | DRIFT | FAIL | ...
@@ -19,6 +44,7 @@ type Idea = {
   status: string;
   plain: string;
   updated: string;
+  created: number | null; // epoch ms the idea was first mined (see minedAt)
   path: string;
   evidencePath: string | null;
   result: Result | null;
@@ -93,6 +119,7 @@ async function listIdeas(): Promise<Idea[]> {
         status: fm.status || 'unknown',
         plain: fm.plain || '',
         updated: fm.updated || '',
+        created: await minedAt(dir),
         path: `autoresearch/ideas/${dir}/idea.md`,
         evidencePath: evidenceMd !== null ? `autoresearch/ideas/${dir}/evidence.md` : null,
         result: evidenceMd !== null ? parseEvidence(evidenceMd) : null,
