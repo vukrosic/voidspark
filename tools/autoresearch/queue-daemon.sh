@@ -550,11 +550,16 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   fi
   case "$verdict" in
     WIN)
-      write_evidence "$idea" WIN "$val" "$delta" "$mean" "$band" "$rdir"
-      flip "$idea" done daemon "WIN: trt=$val vs champion ${CHAMPION_CLASS:-base} ${mean}±${band} (Δ$delta)"
-      [ "$DRY" = 1 ] || append_closed_win "$idea" "$val" "$delta" "$mean" "$band"
-      promote_champion "$idea" "$val" "$rdir"
-      log "$idea — WIN Δ$delta" ;;
+      # LUCKY-SEED GUARD: a single-seed screen WIN is NOT promoted. A lone seed
+      # that beats the bar is how 180 (leak) and 209 (false win) became champion
+      # and poisoned the baseline. It must clear a paired 3-seed confirm against
+      # the champion first (same box, same session — see PROMOTION.md /
+      # NOISE-AND-BAND.md / 208 confirm-3seed.md). We park it in `needs-confirm`;
+      # `autoresearch/bin/confirm_paired.py <idea> <flags>` runs the confirm and
+      # only then is it promoted. NOT closed (no closed.md line), NOT promoted here.
+      write_evidence "$idea" SCREEN-WIN "$val" "$delta" "$mean" "$band" "$rdir"
+      flip "$idea" needs-confirm daemon "SCREEN-WIN (1 seed): trt=$val vs champion ${CHAMPION_CLASS:-base} ${mean}±${band} (Δ$delta) — REQUIRES paired 3-seed confirm before promotion: autoresearch/bin/confirm_paired.py $idea <flags>"
+      log "$idea — SCREEN-WIN Δ$delta → needs-confirm (lucky-seed guard; NOT promoted)" ;;
     NULL)
       write_evidence "$idea" NULL "$val" "$delta" "$mean" "$band" "$rdir"
       flip "$idea" done daemon "NULL: trt=$val inside champion ${CHAMPION_CLASS:-base} ${mean}±${band} (Δ$delta)"
