@@ -34,8 +34,8 @@ const TMUX_BIN =
 const LOCK_DIR = process.env.ORCH_LOCKDIR || '/tmp/orch-locks';
 
 // Mirror the orchestrator's own constants so the bar and the loop agree.
-const FLOOR = 5;
-const CEILING = 20;
+const FLOOR = 12;
+const CEILING = 24;
 const STALE_MIN = 7; // an -ing lock older than this is "possibly stuck"
 
 const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
