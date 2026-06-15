@@ -51,3 +51,4 @@ next-env.d.ts
 # Fresh clones start from projects.example.json via the onboarding card.
 .active-project
 projects.json
+.queue-daemon.log
