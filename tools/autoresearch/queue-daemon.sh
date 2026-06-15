@@ -516,6 +516,8 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # promoted 209 (6.2519) over the alibi champion (6.2403, Δ+0.012 = a NULL). When
   # a champion is defined we pin the bar to its val so a WIN must beat the champion,
   # never a stray base measurement. (band stays the noise band; default 0.04.)
+  # ⚠️ The 0.04 default is 2σ of CROSS-BOX drift, not paired within-session noise
+  # (1σ≈0.017). It hides real +0.01–0.02 stacking wins — see NOISE-AND-BAND.md.
   if [ -n "$CHAMPION_VAL" ] && awk -v v="$CHAMPION_VAL" 'BEGIN{exit !(v+0>0)}'; then
     mean="$CHAMPION_VAL"
     awk -v b="$band" 'BEGIN{exit !(b+0>0)}' || band="${CHAMPION_BAND:-0.04}"
