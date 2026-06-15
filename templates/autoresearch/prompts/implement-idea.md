@@ -22,6 +22,20 @@ repo. The idea to implement is:
 > The change must fit within `loc_budget` behind the `config_flag`, **off by
 > default**, and satisfy `init_constraint` (step 0 byte-identical to the baseline).
 
+> ## 🔴 THE BASELINE IS THE CHAMPION — always check `autoresearch/champion.json`
+> The baseline is **not** the bare model — it is the current **champion** (the
+> best architecture so far, the stack of every promoted win). Read
+> `autoresearch/champion.json`:
+> - Your treatment **stacks on top of the champion**: subclass its `config_class`
+>   (not the bare base), so your change builds on every prior win.
+> - "Step 0 byte-identical" and the control both mean **vs the champion**, not the
+>   bare model. With your flag off, the output must equal the champion's.
+> - Empty `stub` ⇒ no champion yet; fall back to the bare base config.
+>
+> This is how wins compound: each new idea = champion + one new lever. The daemon
+> judges you against the champion's `val` and, if you beat it, promotes you to the
+> new champion automatically — no re-measure, no LLM.
+
 **Repo:** the `repo_path` in `autoresearch/config.json`.
 
 Before you start: `git status` and `git diff` (another agent may be editing the
@@ -54,9 +68,9 @@ confirm:
 - the flag toggles the behavior,
 - with the flag **off**, step-0 output matches the baseline (`init_constraint`).
 
-Follow the run convention in `prompts/runner.md` so the experiment is ready to
-launch (you don't have to run full training here — just make it runnable and note
-the exact command in the `## Plan` section).
+Follow the run convention in `PIPELINE.md` so the experiment is ready to launch
+(you don't have to run full training here — just make it runnable and note the
+exact command in the `## Plan` section).
 
 ## Step 4 — Mark done, signal the app, and stop
 

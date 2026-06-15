@@ -1,0 +1,10 @@
+{
+  "_comment": "The current CHAMPION — the live baseline every new experiment is judged against and stacked on. The daemon (bin/queue-daemon.sh) updates this AUTOMATICALLY on each new record: a winning run pins itself as the new baseline (no re-measure) and its config becomes what the next batch builds on. Start empty; the first WIN seeds it. To seed manually, fill `stub` (a runnable _arq stub) + `config_class` and run `bin/baseline.sh promote <results.json> <val>`.",
+  "stub": "",
+  "config_class": "",
+  "val": null,
+  "band": 0.04,
+  "seed": 42,
+  "lineage": [],
+  "updated": ""
+}

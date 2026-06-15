@@ -32,6 +32,7 @@ BOX_JSON="$ROOT/autoresearch/remote-box.json"
 CONFIG_JSON="$ROOT/autoresearch/config.json"   # repo-specifics (the general tool's only coupling)
 STATE="$ROOT/autoresearch/daemon-state.json"
 CLOSED="$ROOT/autoresearch/closed.md"
+CHAMPION_JSON="$ROOT/autoresearch/champion.json"  # the live baseline experiments stack on
 
 # Repo-specific knobs. Defaults below are overridden by the `drain` block of
 # autoresearch/config.json (see load_config) so this daemon is repo-agnostic —
@@ -76,6 +77,25 @@ PY
   [ -n "$sc" ] && SMOKE_MODEL_CTOR="$sc"
 }
 load_config
+
+# ── champion (the live, stacked baseline) ────────────────────────────────────
+# champion.json names the current best architecture. Every new experiment is
+# judged against (and built on top of) it, and a new record promotes itself —
+# all without re-measuring a control every queue. Empty stub => bare base config.
+CHAMPION_STUB=""; CHAMPION_CLASS=""; CHAMPION_VAL=""
+load_champion() {
+  [ -f "$CHAMPION_JSON" ] || return 0
+  local vals
+  vals="$(python3 - "$CHAMPION_JSON" <<'PY' 2>/dev/null || true
+import json, sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: d = {}
+print(d.get("stub", "")); print(d.get("config_class", "")); print(d.get("val", ""))
+PY
+)"
+  { read -r CHAMPION_STUB; read -r CHAMPION_CLASS; read -r CHAMPION_VAL; } <<<"$vals"
+}
+load_champion
 LOCK="/tmp/queue-daemon.lock"
 
 DRY=0; MODE="once"; LOOP_SECS=600
@@ -288,6 +308,18 @@ append_closed_null() {  # append_closed_null <idea> <delta>
     && mv "$CLOSED.tmp" "$CLOSED"
 }
 
+# A suspected leak (val collapsed far below the baseline — see the leak guard in
+# finalize_one) is logged distinctly so it never reads as a record or a clean null.
+append_closed_leak() {  # append_closed_leak <idea> <val> <mean>
+  local idea="$1" val="$2" mean="$3" line marker
+  marker='<!-- reviewer/evidence step appends one line per close here -->'
+  line="- $idea — LEAK (rejected): val=$val implausibly below baseline $mean at tiny1m3m — likely broken causal mask / label leak, NOT a win — $(date -u +%F)"
+  [ -f "$CLOSED" ] || return 0
+  grep -qF -- "$idea — LEAK" "$CLOSED" && return 0
+  awk -v m="$marker" -v l="$line" '{print} index($0,m)&&!d{print l; d=1}' "$CLOSED" > "$CLOSED.tmp" \
+    && mv "$CLOSED.tmp" "$CLOSED"
+}
+
 # A win is a record — append it to closed.md too, in the same shape the records
 # board parses (slug — WIN: trt=<val> … (Δ<delta>) … <date>). Without this, a
 # daemon-judged win flips to done but never reaches the record timeline.
@@ -299,6 +331,54 @@ append_closed_win() {  # append_closed_win <idea> <val> <delta> <mean> <band>
   grep -qF -- "$idea — WIN:" "$CLOSED" && return 0
   awk -v m="$marker" -v l="$line" '{print} index($0,m)&&!d{print l; d=1}' "$CLOSED" > "$CLOSED.tmp" \
     && mv "$CLOSED.tmp" "$CLOSED"
+}
+
+# Locate an idea's runnable stub (run.json arq_file, else _arq_<idea>.py at root).
+champion_stub_for() {  # champion_stub_for <idea>
+  local idea="$1" arq
+  arq="$(python3 -c "import json;print(json.load(open('$IDEAS/$idea/run.json')).get('arq_file',''))" 2>/dev/null)"
+  [ -n "$arq" ] && [ -f "$ROOT/$arq" ] && { echo "$arq"; return 0; }
+  [ -f "$ROOT/_arq_${idea}.py" ] && { echo "_arq_${idea}.py"; return 0; }
+  return 1
+}
+
+# A new record promotes ITSELF to champion: it becomes the baseline the next
+# batch is judged against and stacked on. Fully deterministic — no LLM, and no
+# re-measure (the winning run already measured the new baseline; we just pin it).
+promote_champion() {  # promote_champion <idea> <val> <rdir>
+  local idea="$1" val="$2" rdir="$3" stub cls
+  stub="$(champion_stub_for "$idea")" || { log "champion: no stub for $idea — promotion skipped"; return 0; }
+  cls="$(python3 - "$ROOT/$stub" <<'PY' 2>/dev/null || true
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r'class\s+C\s*\(\s*([A-Za-z_][\w.]*)\s*\)', src)
+parent = m.group(1) if m else ""
+mod = ""
+if parent and '.' not in parent:
+    im = re.search(r'from\s+([\w.]+)\s+import\s+([^\n]+)', src)
+    if im and parent in [x.strip() for x in im.group(2).split(',')]:
+        mod = im.group(1)
+print(f"{mod}.{parent}" if mod else parent)
+PY
+)"
+  if [ "$DRY" = 1 ]; then log "DRY promote champion -> $idea ($val)"; return 0; fi
+  # Pin the new champion val as this box's baseline (no future ctrl runs).
+  "$BASELINE" promote "$rdir/results.json" "$val" >&2 2>/dev/null || true
+  # Rewrite champion.json: new stub/class/val + append to lineage.
+  python3 - "$CHAMPION_JSON" "$idea" "$stub" "$cls" "$val" <<'PY' 2>/dev/null || true
+import json, sys, datetime
+path, idea, stub, cls, val = sys.argv[1:6]
+val = float(val); today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+try: d = json.load(open(path))
+except Exception: d = {}
+lin = d.get("lineage", []); lin.append({"idea": idea, "config_class": cls, "val": val, "promoted": today})
+d.update({"stub": stub, "config_class": cls, "val": val,
+          "band": d.get("band", 0.04), "seed": d.get("seed", 42),
+          "lineage": lin, "updated": today})
+with open(path, "w") as f: json.dump(d, f, indent=2); f.write("\n")
+PY
+  CHAMPION_STUB="$stub"; CHAMPION_CLASS="$cls"; CHAMPION_VAL="$val"
+  log "NEW CHAMPION: $idea @ $val (${cls:-stub:$stub}) — next batch builds on it"
 }
 
 flip() {  # respects --dry-run
@@ -377,17 +457,36 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # refresh mean/band from the cache for this box (works for CACHED + post-measure).
   # Defaults above keep `set -u` from tripping if `check` yields fewer fields.
   read -r _tag mean band _key < <("$BASELINE" check "$rdir/results.json" 2>/dev/null || echo "X 0 0 0") || true
+  # Guarantee mean/band are bound + numeric no matter what `read` did — a bash 3.2
+  # process-substitution hiccup once left `mean` effectively unset and `set -u`
+  # killed the whole loop at the verdict print. `:=` pins a default in place.
+  : "${mean:=0}" "${band:=0}"
+  # ── leak guard (runs BEFORE the verdict) ─────────────────────────────────
+  # A val far below the baseline neighborhood is never a win — it's a broken
+  # eval. A treatment that leaks future tokens past the causal mask collapses the
+  # loss toward 0. No legitimate single lever halves the loss at fixed scale/data,
+  # so any val below HALF the baseline mean is a suspected leak: reject it, and
+  # crucially never promote_champion (a leaked val as champion poisons every
+  # future experiment, which are then judged against an unbeatable bogus bar).
+  if awk -v v="$val" -v m="$mean" 'BEGIN{exit !(m>0 && v>0 && v < m*0.5)}'; then
+    write_evidence "$idea" LEAK "$val" "0" "$mean" "$band" "$rdir"
+    flip "$idea" rejected daemon "LEAK: val=$val implausibly below baseline $mean (likely broken causal mask / label leak) — not a win, not promoted"
+    [ "$DRY" = 1 ] || append_closed_leak "$idea" "$val" "$mean"
+    log "$idea — LEAK val=$val << baseline $mean (rejected, NOT promoted)"
+    return 0
+  fi
   out="$("$BASELINE" verdict "$rdir/results.json" "$val" 2>/dev/null || echo "NO-BASELINE 0")"
   verdict="${out%% *}"; delta="$(echo "$out" | awk '{print $2}')"
   case "$verdict" in
     WIN)
       write_evidence "$idea" WIN "$val" "$delta" "$mean" "$band" "$rdir"
-      flip "$idea" done daemon "WIN: trt=$val vs $mean±$band (Δ$delta)"
+      flip "$idea" done daemon "WIN: trt=$val vs champion ${CHAMPION_CLASS:-base} $mean±$band (Δ$delta)"
       [ "$DRY" = 1 ] || append_closed_win "$idea" "$val" "$delta" "$mean" "$band"
+      promote_champion "$idea" "$val" "$rdir"
       log "$idea — WIN Δ$delta" ;;
     NULL)
       write_evidence "$idea" NULL "$val" "$delta" "$mean" "$band" "$rdir"
-      flip "$idea" done daemon "NULL: trt=$val inside $mean±$band (Δ$delta)"
+      flip "$idea" done daemon "NULL: trt=$val inside champion ${CHAMPION_CLASS:-base} $mean±$band (Δ$delta)"
       [ "$DRY" = 1 ] || append_closed_null "$idea" "$delta"
       log "$idea — NULL Δ$delta" ;;
     *)
@@ -481,8 +580,17 @@ run () {
 }
 WRAP
     if [ "$mode" = "MEASURE" ]; then
-      # CTRL_CMD is the repo's baseline-control command template from config.json.
-      local CTRL="${CTRL_CMD//\{config\}/$CTRL_CONFIG}"; CTRL="${CTRL//\{seed\}/42}"; CTRL="${CTRL//\{dataset\}/$DATASET}"
+      local CTRL
+      if [ -n "$CHAMPION_STUB" ]; then
+        # The champion IS the baseline — measure it directly (self-contained stub,
+        # fixed seed) so the bar equals the champion's loss. Only fires when no
+        # pinned baseline exists yet (bootstrap); after that the cache is pinned
+        # and a winning run promotes itself, so controls stop running entirely.
+        CTRL="python $CHAMPION_STUB"
+      else
+        # CTRL_CMD is the repo's baseline-control command template from config.json.
+        CTRL="${CTRL_CMD//\{config\}/$CTRL_CONFIG}"; CTRL="${CTRL//\{seed\}/42}"; CTRL="${CTRL//\{dataset\}/$DATASET}"
+      fi
       echo "run ctrl  $CTRL"
       echo "run ctrl2 $CTRL"
       echo "run ctrl3 $CTRL"
@@ -580,7 +688,11 @@ fi
 
 if [ "$MODE" = "loop" ]; then
   log "loop mode, every ${LOOP_SECS}s (ctrl-c to stop)"
-  while true; do tick; sleep "$LOOP_SECS"; done
+  # Isolate each tick in a subshell: `set -uo pipefail` makes any single unbound
+  # var / pipe failure fatal, and without this guard ONE bad tick kills the whole
+  # drainer (which then silently stops draining the GPU). The subshell contains
+  # the blast radius — a failed tick just logs and the loop carries on next cycle.
+  while true; do ( tick ) || log "tick failed (rc $?) — continuing next cycle"; sleep "$LOOP_SECS"; done
 else
   tick
 fi

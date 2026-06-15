@@ -410,6 +410,12 @@ export default function LaunchCodexPage() {
   // Whether the remote training tmux (`arq`) is alive right now — only true
   // while a run is active. Drives the "Attach GPU" button.
   const [arqAlive, setArqAlive] = useState(false);
+  // Two queue-activity clocks from /api/health: when something last ENTERED the
+  // queue (an implement agent marked it needs-run) and when the daemon last
+  // DRAINED a run onto the GPU. Both are absolute epoch ms (or null = never), so
+  // the 1s `now` ticker can count them up live.
+  const [queueAddedAt, setQueueAddedAt] = useState<number | null>(null);
+  const [queueDrainAt, setQueueDrainAt] = useState<number | null>(null);
   // Guards against overlapping usage polls when a request is slow / box is down.
   const usageInFlight = useRef(false);
   // Busy streak start time for debouncing the idle-clock reset.
@@ -706,6 +712,32 @@ export default function LaunchCodexPage() {
         })
         .catch(() => {
           /* leave the optimistic state; next tick retries */
+        });
+    };
+    tick();
+    const interval = setInterval(tick, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Poll the two queue clocks from /api/health (read-only, never ticks the
+  // pipeline). The route returns ages relative to its own `now`; convert to
+  // absolute epochs here once so the 1s ticker counts them up smoothly.
+  useEffect(() => {
+    const tick = () => {
+      fetch("/api/health/")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d?.queue) return;
+          const at = Date.now();
+          setQueueAddedAt(
+            typeof d.queue.lastAddedMs === "number" ? at - d.queue.lastAddedMs : null
+          );
+          setQueueDrainAt(
+            typeof d.queue.lastDrainMs === "number" ? at - d.queue.lastDrainMs : null
+          );
+        })
+        .catch(() => {
+          /* keep last known clocks; next tick retries */
         });
     };
     tick();
@@ -1497,8 +1529,13 @@ export default function LaunchCodexPage() {
     null;
   const staleRunningIdeas = runningIdeas.filter((idea) => {
     const sessionName = RUN_SESSION_PREFIX + idea.id;
-    const isRemoteCurrent = arqAlive && currentRunIdea?.id === idea.id;
-    return !liveSessions.has(sessionName) && !isRemoteCurrent;
+    // A run is in flight if EITHER a local per-idea supervisor session is alive
+    // (the old one-tmux-per-run model) OR the remote arq batch is alive. The
+    // daemon runs a whole BATCH inside a single `arq` tmux and trains the ideas
+    // one at a time, so only one is "current" while the rest sit queued — but
+    // they are NOT stale. Treating non-current batch members as dead was yanking
+    // live runs back to `needs-run` (the "0 running while the GPU is busy" bug).
+    return !liveSessions.has(sessionName) && !arqAlive;
   });
 
   // Self-healing: an idea marked `running` with no live supervisor and no remote
@@ -2966,6 +3003,25 @@ export default function LaunchCodexPage() {
                 </h2>
                 <p className="text-xs text-[#faf9f6]/45">
                   {runningIdeas.length} running · {queuedIdeas.length} ready
+                </p>
+                {/* Two activity clocks so it's obvious the queue is moving even
+                    when the running count looks static: when something last
+                    entered the queue, and when the daemon last sent a run to the
+                    GPU. Both count up live off the 1s `now` ticker. */}
+                <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-[#faf9f6]/35">
+                  <span title="When an idea was last marked needs-run (entered the queue)">
+                    added{" "}
+                    <span className="text-[#faf9f6]/60">
+                      {queueAddedAt ? `${formatAgo(now - queueAddedAt)} ago` : "—"}
+                    </span>
+                  </span>
+                  <span aria-hidden className="text-[#faf9f6]/20">·</span>
+                  <span title="When the daemon last claimed a run and launched it on the GPU box">
+                    drained{" "}
+                    <span className="text-[#faf9f6]/60">
+                      {queueDrainAt ? `${formatAgo(now - queueDrainAt)} ago` : "—"}
+                    </span>
+                  </span>
                 </p>
               </div>
             </div>

@@ -18,6 +18,7 @@ this folder — your model code is untouched.
 ```
 autoresearch/
 ├── config.json         # ← THE ONE FILE TO EDIT (repo path, run cmd, fixed test…)
+├── champion.json        # the live baseline — the best architecture so far (auto-updated)
 ├── ideas/
 │   └── NNN-<slug>/
 │       ├── idea.md     # the idea + `status` frontmatter (source of truth)
@@ -44,6 +45,16 @@ idea with a valid `run.json`, CPU-smokes it, launches a fail-isolated queue in a
 detached `arq` tmux on the box, polls, judges each result against the baseline
 band, and flips statuses — deterministically and cron-safe. It is repo-agnostic:
 the only coupling is the `drain` block of `config.json`.
+
+**Champion stacking (compounding wins).** The baseline isn't the bare model — it's
+the current **champion** in [`champion.json`](champion.json): the best architecture
+so far. The daemon judges every treatment against the champion's pinned val (no
+control re-runs), and when one wins, that run **promotes itself** to the new
+champion — its config becomes what the next batch builds on, and its val becomes
+the new bar. New experiments read `champion.json` and stack one lever on top, so
+gains compound instead of every idea re-testing against the bare model. Start
+empty; the first win seeds it. `lineage` is the full promotion history (and the
+rollback path).
 
 ## Statuses an idea moves through
 

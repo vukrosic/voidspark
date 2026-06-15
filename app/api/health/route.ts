@@ -196,6 +196,16 @@ export async function GET() {
   const HOUR = 3_600_000;
   let flipsLastHour = 0;
   let lastFlipTs = 0;
+  // Two queue timers the dashboard shows: when something last entered the queue,
+  // and when the daemon last drained a run onto the GPU. Both come straight from
+  // the flip events here (no extra disk pass):
+  //   - added   = newest flip TO `needs-run` by an implement agent ("code ready").
+  //               Excludes daemon/reset-button requeues, which are bookkeeping,
+  //               not a genuinely new queue item.
+  //   - drained = newest flip TO `running` by the `daemon` (it claimed a run and
+  //               launched it on the box).
+  let lastAddedTs = 0;
+  let lastDrainTs = 0;
   await Promise.all(
     dirs.map(async (d) => {
       let raw: string;
@@ -208,10 +218,20 @@ export async function GET() {
         const t = line.trim();
         if (!t) continue;
         try {
-          const ts = Date.parse(JSON.parse(t).ts);
+          const j = JSON.parse(t);
+          const ts = Date.parse(j.ts);
           if (!Number.isFinite(ts)) continue;
           if (now - ts <= HOUR) flipsLastHour += 1;
           if (ts > lastFlipTs) lastFlipTs = ts;
+          if (
+            j.to === 'needs-run' &&
+            j.agent !== 'daemon' &&
+            j.agent !== 'reset-button' &&
+            ts > lastAddedTs
+          )
+            lastAddedTs = ts;
+          if (j.to === 'running' && j.agent === 'daemon' && ts > lastDrainTs)
+            lastDrainTs = ts;
         } catch {
           /* skip malformed line */
         }
@@ -259,6 +279,10 @@ export async function GET() {
     throughput: {
       flipsLastHour,
       lastFlipMs: lastFlipTs ? Math.max(0, now - lastFlipTs) : null,
+    },
+    queue: {
+      lastAddedMs: lastAddedTs ? Math.max(0, now - lastAddedTs) : null,
+      lastDrainMs: lastDrainTs ? Math.max(0, now - lastDrainTs) : null,
     },
     best,
     records: { count: recordCount, lastRecordAgeMs },
