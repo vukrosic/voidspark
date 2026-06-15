@@ -123,6 +123,12 @@ elif cmd == "promote":
     print(f"PROMOTED {bk} val_mean={val} band={band} pinned")
 
 elif cmd == "measure":
+    # Never overwrite a PINNED (champion) baseline with a fresh control measurement.
+    # The champion is the trusted bar until the next record promotes a new one; a
+    # stray MEASURE queue running base controls must not clobber it (that reverted
+    # the pin to a base mean and caused a false promotion).
+    if entry is not None and entry.get("pinned"):
+        die(f"PINNED {bk} val_mean={entry['val_mean']} — refusing to overwrite champion baseline", 0)
     vals = ctrl_vals(results)
     if len(vals) < 1:
         die(f"no ctrl* runs in {res_path} to measure from", 3)

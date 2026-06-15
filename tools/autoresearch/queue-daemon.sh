@@ -788,6 +788,15 @@ tick() {
   local chk tag mode
   chk="$("$BASELINE" check "$rdir/results.json" 2>/dev/null)"; tag="${chk%% *}"
   if [ "$tag" = "CACHED" ]; then mode="CACHED"; else mode="MEASURE"; fi
+  # ONE baseline, measured once. When a champion is pinned, NEVER re-measure it:
+  # finalize_one judges every treatment against CHAMPION_VAL (one seed) directly,
+  # so running 3 controls per queue just burns GPU AND lets `baseline.sh measure`
+  # overwrite the pinned champion with a fresh BASE-config control mean (that's how
+  # the pin kept reverting to 6.3988). Force treatment-only whenever a champion exists.
+  if [ -n "$CHAMPION_VAL" ] && awk -v v="$CHAMPION_VAL" 'BEGIN{exit !(v+0>0)}'; then
+    [ "$mode" = "MEASURE" ] && log "champion pinned ($CHAMPION_VAL) — skipping baseline re-measure (treatment-only)"
+    mode="CACHED"
+  fi
   log "baseline: $chk -> $mode path"
 
   launch_queue "$smoked" "$mode"
