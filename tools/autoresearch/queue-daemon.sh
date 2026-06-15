@@ -41,6 +41,10 @@ for ((_i=1; _i<=$#; _i++)); do
   if [ "${!_i}" = "--repo" ]; then _j=$((_i+1)); REPO_ROOT="${!_j:-}"; fi
 done
 ROOT="${REPO_ROOT:-$(cd "$TOOL_DIR/../.." && pwd)}"
+# baseline.sh lives here in voidspark now, so it can't infer the research repo
+# from its own path — hand it the resolved ROOT so its cache writes land in the
+# research repo (not voidspark/autoresearch/, which doesn't exist -> crash).
+export AUTORESEARCH_REPO="$ROOT"
 IDEAS="$ROOT/autoresearch/ideas"
 FLIP="$ROOT/autoresearch/bin/flip.sh"          # per-repo contract (agents call it directly)
 BASELINE="$TOOL_DIR/baseline.sh"               # central, ships with the drainer

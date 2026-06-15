@@ -34,7 +34,12 @@
 # Env: K (staleness guard, default 25). Pinned entries ignore K + commit.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
+# Repo root: honor AUTORESEARCH_REPO (exported by queue-daemon.sh's --repo) so the
+# cache lands in the RESEARCH repo, not in voidspark where this tool now lives.
+# Falling back to script-relative ../.. (the old behavior) resolves to voidspark
+# now that the tooling migrated here — that wrote the cache to the wrong repo and
+# crashed save_cache with FileNotFoundError (no voidspark/autoresearch/ dir).
+root="${AUTORESEARCH_REPO:-$(cd "$(dirname "$0")/../.." && pwd)}"
 cache="$root/autoresearch/baseline-cache.json"
 K="${K:-25}"
 
