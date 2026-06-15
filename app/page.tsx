@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   Activity,
   Cpu,
+  ExternalLink,
   Eye,
   EyeOff,
   FileText,
@@ -79,6 +80,7 @@ const IDEAS_PROMPT_PATH = "autoresearch/prompts/generate-ideas.md";
 const IMPLEMENT_PROMPT_PATH = "autoresearch/prompts/implement-idea.md";
 const RUN_PROMPT_PATH = "autoresearch/prompts/run-idea.md";
 const RUNNER_PROMPT_PATH = "autoresearch/prompts/runner.md";
+const SETUP_BOX_PROMPT_PATH = "autoresearch/prompts/setup-box.md";
 const REMOTE_BOX_PATH = "autoresearch/remote-box.json";
 const IMPLEMENT_SESSION_PREFIX = "lab-implement-";
 const RUN_SESSION_PREFIX = "lab-run-";
@@ -365,6 +367,7 @@ export default function LaunchCodexPage() {
   const [boxVenv, setBoxVenv] = useState<string>("");
   const [boxShow, setBoxShow] = useState<boolean>(false);
   const [boxBusy, setBoxBusy] = useState<boolean>(false);
+  const [boxSetupBusy, setBoxSetupBusy] = useState<boolean>(false);
   const [boxMsg, setBoxMsg] = useState<string>("");
   const [boxConfigured, setBoxConfigured] = useState<{ host: string; port: number | null; user: string } | null>(null);
   const [expandedIdeaGroups, setExpandedIdeaGroups] = useState<Set<string>>(
@@ -1166,6 +1169,35 @@ export default function LaunchCodexPage() {
       setBoxMsg("Network error — is the dev server running?");
     } finally {
       setBoxBusy(false);
+    }
+  };
+
+  // Launch a local agent (tmux) that SSHes into the saved box and sets it up:
+  // clones this project's GitHub repo, reads the repo's instructions, builds the
+  // venv + installs deps, and smoke-tests a run. Saves the box first so the
+  // freshest pasted SSH command is what the agent connects to.
+  const handleSetupBox = async () => {
+    if (boxSetupBusy || boxBusy) return;
+    setBoxSetupBusy(true);
+    setBoxMsg("");
+    try {
+      // Persist the current SSH command first, so the agent targets it.
+      if (boxSsh.trim()) await handleSaveBox();
+      const response = await fetch("/api/setup-box/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent, headless }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!data?.success) {
+        setBoxMsg(data?.error ?? "Couldn't launch the setup agent.");
+        return;
+      }
+      setBoxMsg(`Setup agent launched → tmux ${data.session}`);
+    } catch {
+      setBoxMsg("Network error — is the dev server running?");
+    } finally {
+      setBoxSetupBusy(false);
     }
   };
 
@@ -2458,9 +2490,20 @@ export default function LaunchCodexPage() {
               </label>
 
               <div className="mt-4 border-t border-white/10 pt-3">
-                <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
-                  GPU box (Vast.ai)
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#faf9f6]/40">
+                    GPU box (Vast.ai)
+                  </span>
+                  <a
+                    href="https://cloud.vast.ai/"
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open Vast.ai in your default browser"
+                    className="inline-flex items-center gap-1 rounded-md border border-white/12 px-1.5 py-0.5 text-[10px] font-medium text-[#faf9f6]/65 transition hover:border-white/30 hover:text-white"
+                  >
+                    Open Vast.ai <ExternalLink className="h-2.5 w-2.5" aria-hidden />
+                  </a>
+                </div>
                 <p className="mt-1.5 text-[10px] leading-snug text-[#faf9f6]/40">
                   Paste the SSH command from your Vast.ai instance — host, port, and user are parsed
                   into <span className="font-mono">remote-box.json</span>.
@@ -2519,10 +2562,19 @@ export default function LaunchCodexPage() {
                   <button
                     type="button"
                     onClick={handleSaveBox}
-                    disabled={boxBusy || !boxSsh.trim()}
+                    disabled={boxBusy || boxSetupBusy || !boxSsh.trim()}
                     className="inline-flex h-7 items-center rounded-md border border-violet-400/50 bg-violet-400/15 px-2.5 text-[11px] font-medium text-violet-100 transition hover:bg-violet-400/25 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {boxBusy ? "Saving…" : "Save box"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSetupBox}
+                    disabled={boxBusy || boxSetupBusy || (!boxSsh.trim() && !boxConfigured)}
+                    title="Save the box, then launch an agent that SSHes in, clones this repo, reads its setup instructions, and installs everything"
+                    className="inline-flex h-7 items-center rounded-md border border-cyan-400/50 bg-cyan-400/15 px-2.5 text-[11px] font-medium text-cyan-100 transition hover:bg-cyan-400/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {boxSetupBusy ? "Launching…" : "Set up box →"}
                   </button>
                   {boxConfigured ? (
                     <span className="truncate font-mono text-[10px] text-emerald-300/80">
@@ -2531,7 +2583,7 @@ export default function LaunchCodexPage() {
                   ) : null}
                 </div>
                 {boxMsg ? (
-                  <p className={`mt-1.5 text-[10px] leading-snug ${boxMsg.startsWith("Saved") ? "text-emerald-300/80" : "text-rose-300/90"}`}>
+                  <p className={`mt-1.5 text-[10px] leading-snug ${boxMsg.startsWith("Saved") || boxMsg.startsWith("Setup agent launched") ? "text-emerald-300/80" : "text-rose-300/90"}`}>
                     {boxMsg}
                   </p>
                 ) : null}
@@ -2548,6 +2600,7 @@ export default function LaunchCodexPage() {
                     { path: IMPLEMENT_PROMPT_PATH, title: "implement-idea.md", label: "Implement" },
                     { path: RUNNER_PROMPT_PATH, title: "runner.md", label: "Autorun runner" },
                     { path: RUN_PROMPT_PATH, title: "run-idea.md", label: "Single run" },
+                    { path: SETUP_BOX_PROMPT_PATH, title: "setup-box.md", label: "Set up box" },
                     { path: REMOTE_BOX_PATH, title: "remote-box.json", label: "GPU box" },
                   ].map((p) => (
                     <button

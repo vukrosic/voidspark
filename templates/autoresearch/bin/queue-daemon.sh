@@ -288,6 +288,19 @@ append_closed_null() {  # append_closed_null <idea> <delta>
     && mv "$CLOSED.tmp" "$CLOSED"
 }
 
+# A win is a record — append it to closed.md too, in the same shape the records
+# board parses (slug — WIN: trt=<val> … (Δ<delta>) … <date>). Without this, a
+# daemon-judged win flips to done but never reaches the record timeline.
+append_closed_win() {  # append_closed_win <idea> <val> <delta> <mean> <band>
+  local idea="$1" val="$2" delta="$3" mean="$4" band="$5" line marker
+  marker='<!-- reviewer/evidence step appends one line per close here -->'
+  line="- $idea — WIN: trt=$val vs baseline $mean±$band (Δ$delta) at tiny1m3m — $(date -u +%F)"
+  [ -f "$CLOSED" ] || return 0
+  grep -qF -- "$idea — WIN:" "$CLOSED" && return 0
+  awk -v m="$marker" -v l="$line" '{print} index($0,m)&&!d{print l; d=1}' "$CLOSED" > "$CLOSED.tmp" \
+    && mv "$CLOSED.tmp" "$CLOSED"
+}
+
 flip() {  # respects --dry-run
   if [ "$DRY" = 1 ]; then log "DRY flip $*"; return 0; fi
   "$FLIP" "$@"
@@ -370,6 +383,7 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
     WIN)
       write_evidence "$idea" WIN "$val" "$delta" "$mean" "$band" "$rdir"
       flip "$idea" done daemon "WIN: trt=$val vs $mean±$band (Δ$delta)"
+      [ "$DRY" = 1 ] || append_closed_win "$idea" "$val" "$delta" "$mean" "$band"
       log "$idea — WIN Δ$delta" ;;
     NULL)
       write_evidence "$idea" NULL "$val" "$delta" "$mean" "$band" "$rdir"

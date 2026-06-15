@@ -1,0 +1,17 @@
+  pty_daemon: pid=81700
+gitswarm dashboard: http://localhost:7777
+  state dir:   /Users/vukrosic/my-life/voidspark/.gitswarm/state
+  worktrees:   /Users/vukrosic/my-life/voidspark/.agent-worktrees
+Traceback (most recent call last):
+  File "/Users/vukrosic/my-life/gitswarm/server.py", line 89, in <module>
+    main()
+  File "/Users/vukrosic/my-life/gitswarm/server.py", line 85, in main
+    http.server.ThreadingHTTPServer(bind, Handler).serve_forever()
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/vukrosic/miniconda3/lib/python3.12/socketserver.py", line 457, in __init__
+    self.server_bind()
+  File "/Users/vukrosic/miniconda3/lib/python3.12/http/server.py", line 136, in server_bind
+    socketserver.TCPServer.server_bind(self)
+  File "/Users/vukrosic/miniconda3/lib/python3.12/socketserver.py", line 473, in server_bind
+    self.socket.bind(self.server_address)
+OSError: [Errno 48] Address already in use

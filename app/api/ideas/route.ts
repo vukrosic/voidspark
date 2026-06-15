@@ -101,33 +101,38 @@ async function listIdeas(): Promise<Idea[]> {
     return [];
   }
 
-  const ideas: Idea[] = [];
-  for (const dir of entries) {
-    try {
-      const md = await readFile(join(ideasDir(), dir, 'idea.md'), 'utf8');
-      const fm = parseFrontmatter(md);
-      // Read evidence.md if present, and parse the loss numbers out of it.
-      let evidenceMd: string | null = null;
+  // Read every idea's files concurrently. The old serial for-await loop did
+  // ~4 sequential fs reads × N ideas (idea.md + evidence.md + log + stat), so a
+  // 65-idea queue meant ~260 round-trips back-to-back — the cause of the slow
+  // refresh. Promise.all collapses that to one parallel batch.
+  const settled = await Promise.all(
+    entries.map(async (dir): Promise<Idea | null> => {
       try {
-        evidenceMd = await readFile(join(ideasDir(), dir, 'evidence.md'), 'utf8');
+        const md = await readFile(join(ideasDir(), dir, 'idea.md'), 'utf8');
+        const fm = parseFrontmatter(md);
+        // Read evidence.md (if present) and the mined-at time alongside, not after.
+        const [evidenceMd, created] = await Promise.all([
+          readFile(join(ideasDir(), dir, 'evidence.md'), 'utf8').catch(() => null),
+          minedAt(dir),
+        ]);
+        return {
+          id: fm.id || dir,
+          title: parseTitle(md, dir),
+          status: fm.status || 'unknown',
+          plain: fm.plain || '',
+          updated: fm.updated || '',
+          created,
+          path: `autoresearch/ideas/${dir}/idea.md`,
+          evidencePath: evidenceMd !== null ? `autoresearch/ideas/${dir}/evidence.md` : null,
+          result: evidenceMd !== null ? parseEvidence(evidenceMd) : null,
+        };
       } catch {
-        evidenceMd = null;
+        // No idea.md in this folder — skip.
+        return null;
       }
-      ideas.push({
-        id: fm.id || dir,
-        title: parseTitle(md, dir),
-        status: fm.status || 'unknown',
-        plain: fm.plain || '',
-        updated: fm.updated || '',
-        created: await minedAt(dir),
-        path: `autoresearch/ideas/${dir}/idea.md`,
-        evidencePath: evidenceMd !== null ? `autoresearch/ideas/${dir}/evidence.md` : null,
-        result: evidenceMd !== null ? parseEvidence(evidenceMd) : null,
-      });
-    } catch {
-      // No idea.md in this folder — skip.
-    }
-  }
+    })
+  );
+  const ideas: Idea[] = settled.filter((x): x is Idea => x !== null);
 
   // Newest first by updated timestamp, falling back to id.
   ideas.sort((a, b) => (b.updated || b.id).localeCompare(a.updated || a.id));

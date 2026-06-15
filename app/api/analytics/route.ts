@@ -18,6 +18,9 @@ import { getActiveRepoDir } from '@/lib/projects';
 // deviation reflects real variance, not an average of averages.
 
 const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+// Finished ideas are moved here to declutter the live queue. Analytics still
+// reads them so stage-timing history covers the whole pipeline, not just active work.
+const archiveDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas-archive');
 
 // Terminal states: reaching one ends an idea's pipeline. End-to-end time is
 // measured from the first event to the first terminal event.
@@ -119,10 +122,17 @@ function stdev(xs: number[]): number {
 
 export async function POST() {
   const now = Date.now();
-  let dirs: string[];
-  try {
-    dirs = await readdir(ideasDir());
-  } catch {
+  // Live ideas + archived ones, each tagged with its base dir so the per-idea
+  // file reads below resolve correctly regardless of which folder it lives in.
+  const entries: { dir: string; base: string }[] = [];
+  for (const base of [ideasDir(), archiveDir()]) {
+    try {
+      for (const dir of await readdir(base)) entries.push({ dir, base });
+    } catch {
+      /* folder absent (e.g. no archive yet) — skip */
+    }
+  }
+  if (entries.length === 0) {
     return Response.json({ success: true, stages: [], endToEnd: null, inFlight: [], totals: {} });
   }
 
@@ -136,10 +146,10 @@ export async function POST() {
   let failures = 0;
   let ideasWithLogs = 0;
 
-  for (const dir of dirs) {
+  for (const { dir, base } of entries) {
     let logRaw: string;
     try {
-      logRaw = await readFile(join(ideasDir(), dir, 'log.jsonl'), 'utf8');
+      logRaw = await readFile(join(base, dir, 'log.jsonl'), 'utf8');
     } catch {
       continue; // no transition log — nothing to measure
     }
@@ -170,7 +180,7 @@ export async function POST() {
     // Title for the in-flight list.
     let title = dir;
     try {
-      const md = await readFile(join(ideasDir(), dir, 'idea.md'), 'utf8');
+      const md = await readFile(join(base, dir, 'idea.md'), 'utf8');
       title = parseTitle(md, dir);
     } catch {
       /* fall back to dir name */
@@ -179,7 +189,7 @@ export async function POST() {
     // Reviewer outcome: the verdict the reviewer wrote into evidence.md. This is
     // the "did it work?" answer (Improved / No change / Worse / Invalid run).
     try {
-      const ev = await readFile(join(ideasDir(), dir, 'evidence.md'), 'utf8');
+      const ev = await readFile(join(base, dir, 'evidence.md'), 'utf8');
       const m = ev.match(/##\s*Verdict:\s*([A-Za-z]+)/i);
       if (m) {
         const v = m[1].toUpperCase();
@@ -198,7 +208,7 @@ export async function POST() {
     // sat as Proposed before anyone started" as idea.md creation → first event.
     if (events[0].from === 'needs-taste') {
       try {
-        const birth = (await stat(join(ideasDir(), dir, 'idea.md'))).birthtimeMs;
+        const birth = (await stat(join(base, dir, 'idea.md'))).birthtimeMs;
         const wait = events[0].ts - birth;
         if (birth > 0 && wait >= 0 && wait <= STUCK_MS) {
           const list = byState.get('needs-taste') ?? [];

@@ -1,6 +1,6 @@
 import { execFile } from 'child_process';
 import { existsSync } from 'fs';
-import { readFile, readdir, stat } from 'fs/promises';
+import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { promisify } from 'util';
 import { getActiveRepoDir } from '@/lib/projects';
@@ -227,26 +227,24 @@ export async function GET() {
     const raw = await readFile(recordsPath(), 'utf8');
     const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
     recordCount = lines.length;
+    let newestTs: number | null = null;
     for (const t of lines) {
       try {
         const j = JSON.parse(t);
         if (typeof j.val === 'number' && (best === null || j.val < best.val)) {
           best = { val: j.val, idea: String(j.idea ?? '') };
         }
+        // Age comes from the record's OWN timestamp, not the file mtime: the
+        // research-records route rewrites records.jsonl (idempotent mirror) on
+        // every fetch, so its mtime is always ~now — that's why the timer was
+        // stuck at "0s". The newest record's `ts` is the real "last record" time.
+        const ms = j.ts ? Date.parse(j.ts) : NaN;
+        if (Number.isFinite(ms) && (newestTs === null || ms > newestTs)) newestTs = ms;
       } catch {
         /* skip */
       }
     }
-    // records.jsonl is append-only — its mtime is when the last record landed.
-    try {
-      const m = await stat(recordsPath());
-      // Clamp at 0: `now` is captured at request start, but the loop can rewrite
-      // records.jsonl before this stat runs, making mtime a hair newer than now
-      // (which otherwise renders as a nonsensical "-1s ago").
-      if (recordCount > 0) lastRecordAgeMs = Math.max(0, now - m.mtimeMs);
-    } catch {
-      /* no file */
-    }
+    if (recordCount > 0 && newestTs !== null) lastRecordAgeMs = Math.max(0, now - newestTs);
   } catch {
     /* no records yet */
   }

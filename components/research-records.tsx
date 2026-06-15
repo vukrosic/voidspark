@@ -100,16 +100,44 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
         </div>
       )}
 
-      {records.length === 0 ? (
+      {!baseline && records.length === 0 ? (
         <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-sm text-[#faf9f6]/45">
-          No record-breaking wins on this box yet — beat{" "}
-          <span className="font-mono text-yellow-100">
-            {baseline ? baseline.val.toFixed(4) : "the baseline"}
-          </span>{" "}
-          to start the record.
+          No baseline measured on this box yet — the record timeline starts once
+          the daemon measures the control bracket.
         </p>
       ) : (
         <ol className="relative space-y-2 border-l border-white/10 pl-5">
+          {/* Baseline is the FIRST point on the timeline — the line every record
+              is measured against. Renders as a hollow node (not a ★ win) dated to
+              the box's era start, so the timeline always reads baseline → wins. */}
+          {baseline && (
+            <li className="relative">
+              <span className="absolute -left-[1.42rem] top-2 h-2.5 w-2.5 rounded-full border border-yellow-300/60 bg-[#1f1e1d]" />
+              <div className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="truncate text-sm font-semibold text-[#faf9f6]/75">
+                    baseline · record to beat
+                  </span>
+                  <span className="shrink-0 font-mono text-xs tabular-nums text-[#faf9f6]/45">
+                    {baseline.eraStart}
+                  </span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] tabular-nums">
+                  <span className="text-yellow-100">val {baseline.val.toFixed(4)}</span>
+                  <span className="text-[#faf9f6]/35">±{baseline.band.toFixed(3)} band</span>
+                  {baseline.gpu && <span className="text-[#faf9f6]/35">{baseline.gpu}</span>}
+                </div>
+              </div>
+            </li>
+          )}
+          {records.length === 0 && (
+            <li className="relative">
+              <span className="absolute -left-[1.42rem] top-2 h-2.5 w-2.5 rounded-full border border-dashed border-white/25 bg-transparent" />
+              <p className="px-4 py-2 text-[11px] text-[#faf9f6]/40">
+                No win has beaten the baseline yet — the next record lands here.
+              </p>
+            </li>
+          )}
           {records.map((r, i) => (
             <li key={`${r.slug}-${i}`} className="relative">
               <span
