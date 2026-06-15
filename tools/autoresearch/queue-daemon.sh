@@ -508,6 +508,18 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # multibyte `±` into the variable name (`mean\xC2`), which set -u then reports as
   # an unbound var and kills the whole finalize loop at the verdict print.
   : "${mean:=0}" "${band:=0}"
+  # ── champion is the AUTHORITATIVE bar ────────────────────────────────────
+  # Judge against the CURRENT champion's val, not the per-box control mean. When
+  # the box_key changes (new rental / commit churn) `check` re-measures a baseline,
+  # and if those controls ran the BASE config instead of the champion the per-box
+  # mean sits far ABOVE the champion — judging a treatment against THAT falsely
+  # promoted 209 (6.2519) over the alibi champion (6.2403, Δ+0.012 = a NULL). When
+  # a champion is defined we pin the bar to its val so a WIN must beat the champion,
+  # never a stray base measurement. (band stays the noise band; default 0.04.)
+  if [ -n "$CHAMPION_VAL" ] && awk -v v="$CHAMPION_VAL" 'BEGIN{exit !(v+0>0)}'; then
+    mean="$CHAMPION_VAL"
+    awk -v b="$band" 'BEGIN{exit !(b+0>0)}' || band="${CHAMPION_BAND:-0.04}"
+  fi
   # ── leak guard (runs BEFORE the verdict) ─────────────────────────────────
   # A val far below the baseline neighborhood is never a win — it's a broken
   # eval. A treatment that leaks future tokens past the causal mask collapses the
@@ -522,8 +534,18 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
     log "$idea — LEAK val=$val << baseline $mean (rejected, NOT promoted)"
     return 0
   fi
-  out="$("$BASELINE" verdict "$rdir/results.json" "$val" 2>/dev/null || echo "NO-BASELINE 0")"
-  verdict="${out%% *}"; delta="$(echo "$out" | awk '{print $2}')"
+  # Verdict against the (champion-pinned) mean/band. Computed locally — NOT via
+  # `baseline.sh verdict`, which re-reads the per-box cache mean and would undo the
+  # champion override above and re-introduce the false-promotion. WIN iff the
+  # treatment clears the bar by more than the noise band; NO-BASELINE only when
+  # there is genuinely no champion and no cached baseline (mean<=0).
+  local verdict delta
+  if awk -v m="$mean" 'BEGIN{exit !(m+0>0)}'; then
+    delta="$(awk -v v="$val" -v m="$mean" 'BEGIN{printf "%.4f", v-m}')"
+    if awk -v v="$val" -v m="$mean" -v b="$band" 'BEGIN{exit !(v+0 < m-b)}'; then verdict="WIN"; else verdict="NULL"; fi
+  else
+    verdict="NO-BASELINE"; delta="0"
+  fi
   case "$verdict" in
     WIN)
       write_evidence "$idea" WIN "$val" "$delta" "$mean" "$band" "$rdir"
