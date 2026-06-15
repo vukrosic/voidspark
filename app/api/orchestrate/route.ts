@@ -5,6 +5,7 @@ import { join } from 'path';
 import { launchCodexWithText } from '@/lib/codexLauncher';
 import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 import { getAutopilotAgent, setAutopilot } from '@/lib/autopilot';
+import { FLOOR, CEILING } from '@/lib/orchestratorConfig';
 
 // Autopilot tick. When ON, each call (the UI poll drives it) runs ONE
 // orchestrate.sh pass — reclaim stale `-ing` locks + fan out one worker per
@@ -18,13 +19,6 @@ const IDEAS_DIR = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
 const ORCH = () => join(getActiveRepoDir(), 'autoresearch', 'bin', 'orchestrate.sh');
 const GEN_PROMPT = () => join(getActiveRepoDir(), 'autoresearch', 'prompts', 'generate-ideas.md');
 const GEN_SESSION = 'lab-generate-ideas';
-
-// Auto-refill bounds: keep at least FLOOR ideas in flight, never exceed CEILING.
-// "In flight" = any idea not done/rejected. FLOOR raised 5->12 (2026-06-15): the
-// GPU drains a 6-idea batch in ~22 min but each implement takes ~7-15 min, so a
-// floor of 5 starved the GPU between batches. A deeper backlog keeps it fed.
-const FLOOR = 12;
-const CEILING = 24;
 
 function field(md: string, key: string): string {
   const m = md.match(new RegExp(`^${key}:\\s*(.+)$`, 'm'));

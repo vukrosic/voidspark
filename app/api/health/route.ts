@@ -7,6 +7,7 @@ import { getActiveRepoDir } from '@/lib/projects';
 import { getAutopilotAgent } from '@/lib/autopilot';
 import { getAutorunAgent } from '@/lib/autorun';
 import { getAutoImplementAgent } from '@/lib/autoimplement';
+import { FLOOR, CEILING } from '@/lib/orchestratorConfig';
 
 // ---- System health snapshot -------------------------------------------------
 // One read-only GET that gathers every "is the loop alive?" signal the dashboard
@@ -33,9 +34,7 @@ const TMUX_BIN =
 
 const LOCK_DIR = process.env.ORCH_LOCKDIR || '/tmp/orch-locks';
 
-// Mirror the orchestrator's own constants so the bar and the loop agree.
-const FLOOR = 12;
-const CEILING = 24;
+// FLOOR/CEILING come from lib/orchestratorConfig so the bar and the loop agree.
 const STALE_MIN = 7; // an -ing lock older than this is "possibly stuck"
 
 const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
