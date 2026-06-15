@@ -1,5 +1,6 @@
 ---
 id: 000-example-idea
+author: model-id-that-wrote-this   # e.g. claude-opus-4-8 — attributes the experiment to the LLM that authored it
 status: needs-taste
 round: 1
 updated: 2026-01-01T00:00:00Z

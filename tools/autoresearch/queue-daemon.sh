@@ -21,13 +21,29 @@
 # No auto-push — local working tree + remote run only.
 #
 # Usage:
-#   autoresearch/bin/queue-daemon.sh [--once] [--loop SECONDS] [--dry-run]
+#   queue-daemon.sh [--repo PATH] [--once] [--loop SECONDS] [--dry-run]
+#   --repo PATH : the repo to drain (its autoresearch/ data). Defaults to the repo
+#                 this script lives in. Also settable via $REPO_ROOT.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# TWO independent locations, deliberately split so this drainer can be ONE shared
+# copy that drains ANY repo (no more per-repo script copies that drift):
+#   TOOL_DIR  — where this script + its siblings (baseline.sh, _box_smoke.py) live.
+#   ROOT      — the repo being drained: its autoresearch/ data (ideas, config,
+#               champion, closed, results). Set via `--repo PATH` or $REPO_ROOT;
+#               defaults to the repo this script lives in (back-compat for an
+#               in-repo copy). flip.sh stays REPO-relative — it's the repo's own
+#               status-change contract, called directly by agents/prompts/orchestrate.
+TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Pre-scan argv for --repo so ROOT-derived paths below are correct before the main
+# arg loop runs (load_config/load_champion read them at parse time). bash 3.2-safe.
+for ((_i=1; _i<=$#; _i++)); do
+  if [ "${!_i}" = "--repo" ]; then _j=$((_i+1)); REPO_ROOT="${!_j:-}"; fi
+done
+ROOT="${REPO_ROOT:-$(cd "$TOOL_DIR/../.." && pwd)}"
 IDEAS="$ROOT/autoresearch/ideas"
-FLIP="$ROOT/autoresearch/bin/flip.sh"
-BASELINE="$ROOT/autoresearch/bin/baseline.sh"
+FLIP="$ROOT/autoresearch/bin/flip.sh"          # per-repo contract (agents call it directly)
+BASELINE="$TOOL_DIR/baseline.sh"               # central, ships with the drainer
 BOX_JSON="$ROOT/autoresearch/remote-box.json"
 CONFIG_JSON="$ROOT/autoresearch/config.json"   # repo-specifics (the general tool's only coupling)
 STATE="$ROOT/autoresearch/daemon-state.json"
@@ -53,9 +69,14 @@ DEFAULT_TIMEOUT="${JOB_TIMEOUT:-12m}"
 SMOKE_TRAINER="train_llm"
 SMOKE_MODEL_IMPORT="from models.llm import MinimalLLM"
 SMOKE_MODEL_CTOR="MinimalLLM"
+# Model/config code the box must `git pull` before it can build a stub. Implementer
+# agents edit these in the working tree but are forbidden to push (human-review gate),
+# so without this the box pulls stale code -> ImportError -> smoke FAIL -> GPU starves.
+# autosync_code() commits+pushes exactly these paths before every remote pull.
+SYNC_PATHS="configs models train_llm.py"
 load_config() {
   [ -f "$CONFIG_JSON" ] || return 0
-  local vals rt bc dp cc st si sc
+  local vals rt bc dp cc st si sc sp
   vals="$(python3 - "$CONFIG_JSON" <<'PY' 2>/dev/null || true
 import json, sys
 try: d = (json.load(open(sys.argv[1])).get("drain") or {})
@@ -65,9 +86,10 @@ print(d.get("remote_tmux",""));   print(d.get("baseline_config",""))
 print(d.get("dataset_path",""));  print(d.get("ctrl_command",""))
 print(s.get("trainer",""));       print(s.get("model_import",""))
 print(s.get("model_ctor",""))
+print(" ".join(d.get("sync_paths") or []))
 PY
 )"
-  { read -r rt; read -r bc; read -r dp; read -r cc; read -r st; read -r si; read -r sc; } <<<"$vals"
+  { read -r rt; read -r bc; read -r dp; read -r cc; read -r st; read -r si; read -r sc; read -r sp; } <<<"$vals"
   [ -n "$rt" ] && REMOTE_TMUX="$rt"
   [ -n "$bc" ] && CTRL_CONFIG="$bc"
   [ -n "$dp" ] && DATASET="$dp"
@@ -75,6 +97,7 @@ PY
   [ -n "$st" ] && SMOKE_TRAINER="$st"
   [ -n "$si" ] && SMOKE_MODEL_IMPORT="$si"
   [ -n "$sc" ] && SMOKE_MODEL_CTOR="$sc"
+  [ -n "$sp" ] && SYNC_PATHS="$sp"
 }
 load_config
 
@@ -96,13 +119,16 @@ PY
   { read -r CHAMPION_STUB; read -r CHAMPION_CLASS; read -r CHAMPION_VAL; } <<<"$vals"
 }
 load_champion
-LOCK="/tmp/queue-daemon.lock"
+# Lock keyed by the drained repo, not the script path — one shared daemon binary
+# can drain several repos concurrently without their ticks colliding on one lock.
+LOCK="/tmp/queue-daemon-$(echo "$ROOT" | shasum 2>/dev/null | cut -c1-12 || echo default).lock"
 
 DRY=0; MODE="once"; LOOP_SECS=600
 while [ $# -gt 0 ]; do case "$1" in
   --dry-run) DRY=1;;
   --once) MODE="once";;
   --loop) MODE="loop"; [ -n "${2:-}" ] && { LOOP_SECS="$2"; shift; };;
+  --repo) [ -n "${2:-}" ] && shift;;   # pre-scanned above into ROOT; just consume the value
   *) echo "unknown arg: $1" >&2; exit 2;;
 esac; shift; done
 
@@ -192,7 +218,12 @@ arq_live() { SSH "tmux has-session -t $REMOTE_TMUX 2>/dev/null"; }
 box_reachable() { ensure_master; }
 
 iso_to_epoch() { date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo 0; }
-field() { awk -F': *' -v k="$2" '$1==k{print $2; exit}' "$1"; }            # field <file> <key>
+# field <file> <key> — read a YAML-frontmatter scalar. Split on the FIRST colon
+# only: values legitimately contain colons (e.g. `updated: 2026-06-15T11:19:58Z`),
+# and the old `-F': *'` split every colon, truncating timestamps to `...T11` →
+# iso_to_epoch parse-fail → 0 → bogus ~29e6-minute ages → every running idea looked
+# stale → reclaimed every tick → relaunch races on a live GPU (the OOM collisions).
+field() { awk -v k="$2" '{p=index($0,":"); if(p>0 && substr($0,1,p-1)==k){v=substr($0,p+1); sub(/^ +/,"",v); print v; exit}}' "$1"; }
 idea_status() { field "$IDEAS/$1/idea.md" status; }
 
 # ── needs-run claim eligibility: must ship a valid run.json + existing arq_file ─
@@ -230,7 +261,7 @@ results_init() {
   gpu="$(echo "$probe"  | sed -n '1p' | awk -F', *' '{print $1}')"
   drv="$(echo "$probe"  | sed -n '1p' | awk -F', *' '{print $2}')"
   vram="$(echo "$probe" | sed -n '1p' | awk -F', *' '{print $3}')"
-  cc="$(echo "$probe"   | sed -n '/<<>>/{n;p}')"
+  cc="$(echo "$probe"   | awk '/<<>>/{getline; print}')"
   mkdir -p "$rdir"
   python3 - "$rdir/results.json" "$gpu" "$drv" "$vram" "$cc" "$HOST:$PORT" <<'PY'
 import json, os, sys, datetime
@@ -326,7 +357,7 @@ append_closed_leak() {  # append_closed_leak <idea> <val> <mean>
 append_closed_win() {  # append_closed_win <idea> <val> <delta> <mean> <band>
   local idea="$1" val="$2" delta="$3" mean="$4" band="$5" line marker
   marker='<!-- reviewer/evidence step appends one line per close here -->'
-  line="- $idea — WIN: trt=$val vs baseline $mean±$band (Δ$delta) at tiny1m3m — $(date -u +%F)"
+  line="- $idea — WIN: trt=$val vs baseline ${mean}±${band} (Δ$delta) at tiny1m3m — $(date -u +%F)"
   [ -f "$CLOSED" ] || return 0
   grep -qF -- "$idea — WIN:" "$CLOSED" && return 0
   awk -v m="$marker" -v l="$line" '{print} index($0,m)&&!d{print l; d=1}' "$CLOSED" > "$CLOSED.tmp" \
@@ -383,7 +414,13 @@ PY
 
 flip() {  # respects --dry-run
   if [ "$DRY" = 1 ]; then log "DRY flip $*"; return 0; fi
-  "$FLIP" "$@"
+  # flip.sh prints its "<idea>: <from> -> <to> ... logged" confirmation to STDOUT.
+  # claimable()/sync_and_smoke() return their batch via command substitution, so a
+  # stray flip line on stdout gets swallowed into the batch and parsed as a garbage
+  # "run <idea>: python <to>" job (trailing colon on the slug -> awk can't-open-file
+  # flood in finalize). Force it to stderr like log(), so it stays visible in the
+  # pane but never pollutes the data stream. See the stdout-discipline note above.
+  "$FLIP" "$@" >&2
 }
 
 # ── parse one pulled log's Final readout (deterministic — see RUN-CONTRACT.md) ─
@@ -408,6 +445,10 @@ finalize() {
   local measured_ctrls=0 line tag name
   while IFS= read -r line; do
     tag="${line%% *}"; name="$(echo "$line" | awk '{print $2}')"
+    name="${name%:}"   # belt-and-suspenders: a legit slug never ends in ':'; a
+                       # trailing colon means a stray flip line leaked into the
+                       # batch (now fixed at the flip() wrapper) — strip it so an
+                       # already-written STATUS line can't flood awk with a bad path
     [ -n "$name" ] || continue
     case "$tag" in
       OK)
@@ -457,17 +498,19 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # refresh mean/band from the cache for this box (works for CACHED + post-measure).
   # Defaults above keep `set -u` from tripping if `check` yields fewer fields.
   read -r _tag mean band _key < <("$BASELINE" check "$rdir/results.json" 2>/dev/null || echo "X 0 0 0") || true
-  # Guarantee mean/band are bound + numeric no matter what `read` did — a bash 3.2
-  # process-substitution hiccup once left `mean` effectively unset and `set -u`
-  # killed the whole loop at the verdict print. `:=` pins a default in place.
+  # Guarantee mean/band are bound + numeric no matter what `read` did. `:=` pins a
+  # default in place. NOTE: the verdict/flip strings below MUST brace the vars as
+  # `${mean}±${band}` — an unbraced `$mean±` lets bash fold the leading byte of the
+  # multibyte `±` into the variable name (`mean\xC2`), which set -u then reports as
+  # an unbound var and kills the whole finalize loop at the verdict print.
   : "${mean:=0}" "${band:=0}"
   # ── leak guard (runs BEFORE the verdict) ─────────────────────────────────
   # A val far below the baseline neighborhood is never a win — it's a broken
   # eval. A treatment that leaks future tokens past the causal mask collapses the
-  # loss toward 0. No legitimate single lever halves the loss at fixed scale/data,
-  # so any val below HALF the baseline mean is a suspected leak: reject it, and
-  # crucially never promote_champion (a leaked val as champion poisons every
-  # future experiment, which are then judged against an unbeatable bogus bar).
+  # loss toward 0 (180-qk-logit-conv: val 0.984 / acc 0.878 vs baseline 6.24,
+  # auto-promoted to champion before this guard existed). No legitimate single
+  # lever halves the loss at fixed scale/data, so any val below HALF the baseline
+  # mean is a suspected leak: reject it, and crucially never promote_champion.
   if awk -v v="$val" -v m="$mean" 'BEGIN{exit !(m>0 && v>0 && v < m*0.5)}'; then
     write_evidence "$idea" LEAK "$val" "0" "$mean" "$band" "$rdir"
     flip "$idea" rejected daemon "LEAK: val=$val implausibly below baseline $mean (likely broken causal mask / label leak) — not a win, not promoted"
@@ -480,13 +523,13 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   case "$verdict" in
     WIN)
       write_evidence "$idea" WIN "$val" "$delta" "$mean" "$band" "$rdir"
-      flip "$idea" done daemon "WIN: trt=$val vs champion ${CHAMPION_CLASS:-base} $mean±$band (Δ$delta)"
+      flip "$idea" done daemon "WIN: trt=$val vs champion ${CHAMPION_CLASS:-base} ${mean}±${band} (Δ$delta)"
       [ "$DRY" = 1 ] || append_closed_win "$idea" "$val" "$delta" "$mean" "$band"
       promote_champion "$idea" "$val" "$rdir"
       log "$idea — WIN Δ$delta" ;;
     NULL)
       write_evidence "$idea" NULL "$val" "$delta" "$mean" "$band" "$rdir"
-      flip "$idea" done daemon "NULL: trt=$val inside champion ${CHAMPION_CLASS:-base} $mean±$band (Δ$delta)"
+      flip "$idea" done daemon "NULL: trt=$val inside champion ${CHAMPION_CLASS:-base} ${mean}±${band} (Δ$delta)"
       [ "$DRY" = 1 ] || append_closed_null "$idea" "$delta"
       log "$idea — NULL Δ$delta" ;;
     *)
@@ -511,6 +554,28 @@ reclaim() {
   done
 }
 
+# ── 3a½. push local model code so the box's `git pull` actually gets it ──────
+# Implementers edit $SYNC_PATHS in the working tree but never push (human-review
+# gate), so the box would pull stale code and smoke-FAIL on import. We close that
+# gap here: stage only $SYNC_PATHS, py_compile-guard them (never push a syntax
+# error), commit if changed, and push the current branch. Best-effort — any
+# failure just means the box pulls whatever was last pushed, same as before.
+autosync_code() {
+  ( cd "$ROOT" || exit 0
+    git add -- $SYNC_PATHS 2>/dev/null || exit 0
+    git diff --cached --quiet -- $SYNC_PATHS && exit 0   # nothing new to ship
+    # syntax-guard: bail (leaving staged) if any staged .py won't compile
+    local pyfiles
+    pyfiles="$(git diff --cached --name-only -- $SYNC_PATHS | grep '\.py$')"
+    if [ -n "$pyfiles" ] && ! python3 -m py_compile $pyfiles 2>/dev/null; then
+      log "autosync SKIP: staged model code fails py_compile — not pushing"; exit 0
+    fi
+    git commit -q -m "daemon: auto-sync model code for box pull [$(date -u +%FT%TZ)]" || exit 0
+    git push -q 2>&1 | tail -1 >&2 || log "autosync push warned (continuing)"
+    log "autosync: pushed model code $(git rev-parse --short HEAD)"
+  ) || true
+}
+
 # ── 3b. sync + CPU build-smoke every claimed arq on the box (BATCHED) ────────
 # echoes the subset of "<idea> <arq> <to>" lines that passed smoke. The whole
 # step is 3 connections regardless of batch size — git pull, one batched scp of
@@ -526,9 +591,10 @@ sync_and_smoke() {
   done <<<"$batch"
   [ "${#arqs[@]}" -gt 0 ] || return 0
 
+  autosync_code   # ship implementer-written model code before the box pulls it
   SSH "cd $REMOTE_REPO && git pull --ff-only 2>&1 | tail -1" >&2 || log "git pull warned (continuing)"
   # one batched scp: the smoke helper + every stub, all into the repo root
-  SCP_MANY_TO "$ROOT/autoresearch/bin/_box_smoke.py" "${srcs[@]}" "$REMOTE_REPO/" 2>/dev/null \
+  SCP_MANY_TO "$TOOL_DIR/_box_smoke.py" "${srcs[@]}" "$REMOTE_REPO/" 2>/dev/null \
     || log "batch scp warned (continuing; missing stubs will smoke-FAIL)"
   # one ssh: smoke every stub remotely, one result line each: "SMOKE <arq> <msg>".
   # SMOKE_* tell _box_smoke.py the repo's trainer + model ctor (from config.json).
@@ -604,8 +670,45 @@ WRAP
 
   if [ "$DRY" = 1 ]; then log "DRY launch ($mode): $(echo "$batch" | grep -c .) jobs"; cat "$qs"; return 0; fi
   SSH "mkdir -p ~/arq && : > ~/arq/STATUS"
+  # MEASURE controls run `python $CHAMPION_STUB`, but sync_and_smoke only ships
+  # the *treatment* stubs — ship the champion control stub too, or all 3 ctrls
+  # die rc=2 (No such file) and the queue silently falls back to the cached band.
+  if [ "$mode" = "MEASURE" ] && [ -n "$CHAMPION_STUB" ]; then
+    if [ -f "$ROOT/$CHAMPION_STUB" ]; then
+      SCP_TO "$ROOT/$CHAMPION_STUB" "$REMOTE_REPO/$CHAMPION_STUB" 2>/dev/null \
+        || log "champion stub scp warned ($CHAMPION_STUB) — ctrls may FAIL"
+    else
+      log "champion stub $CHAMPION_STUB missing locally — MEASURE ctrls will FAIL"
+    fi
+  fi
   SCP_TO "$qs" "~/arq/run_queue.sh"
-  SSH "tmux new-session -d -s $REMOTE_TMUX 'bash ~/arq/run_queue.sh'"
+  # ── GPU 1-by-1 HARD GUARD ──────────────────────────────────────────────────
+  # Enforce exactly one experiment on the GPU at a time. The has-session check,
+  # the GPU-busy check, and the session create all run in ONE remote shell, so
+  # there is no cross-network TOCTOU window (the old bare `tmux new-session` had
+  # one: arq_live() ran in a prior ssh, and a manual run or a second daemon could
+  # slip a process onto the GPU in between → two procs → CUDA OOM collision).
+  #   • tmux has-session  : refuse if our queue is already live.
+  #   • nvidia-smi        : refuse if ANY compute proc holds the GPU — catches
+  #                         stray/manual runs the tmux check can't see.
+  #   • tmux new-session  : atomic on the session name, so two daemons racing the
+  #                         same tick can't both win `arq`; the loser gets nothing.
+  # Fail-closed: unless the GPU is provably idle AND we won the session, we do NOT
+  # launch — claimed ideas bounce back to needs-run for a later tick.
+  local launch_out
+  launch_out="$(SSH "
+    if tmux has-session -t $REMOTE_TMUX 2>/dev/null; then echo 'ABORT:arq-already-live'; exit 0; fi
+    busy=\$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .)
+    if [ \"\${busy:-0}\" -ne 0 ]; then echo \"ABORT:gpu-busy-\${busy}proc\"; exit 0; fi
+    if tmux new-session -d -s $REMOTE_TMUX 'bash ~/arq/run_queue.sh'; then echo 'LAUNCH_OK'; else echo 'ABORT:tmux-create-lost-race'; fi
+  ")"
+  if [ "$launch_out" != "LAUNCH_OK" ]; then
+    log "LAUNCH ABORTED (${launch_out:-no-box-response}) — GPU not provably idle; bouncing treatments back to needs-run"
+    while read -r idea arq to; do
+      [ -n "$idea" ] && flip "$idea" needs-run daemon "launch aborted: ${launch_out:-box unreachable} — GPU not idle (1-by-1 guard)"
+    done <<<"$batch"
+    return 1
+  fi
   results_init "$rdir"
   # decide + cache the baseline mode/band for this queue, store for finalize
   local chk tag mean band key

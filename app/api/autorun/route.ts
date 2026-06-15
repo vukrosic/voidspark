@@ -63,11 +63,15 @@ async function killRunner(): Promise<void> {
 // script is idempotent and self-locking (flock), so spawning it on every poll
 // is safe — overlapping ticks exit immediately and a live `arq` queue is never
 // relaunched. Output tails to /tmp/queue-daemon.log. No LLM in this path.
+//
+// The drainer is ONE shared copy under voidspark/tools/ (single source of truth —
+// no per-repo script copies that drift). It drains whichever repo we point it at
+// via --repo; flip.sh + the repo's autoresearch/ data still live in that repo.
 function runDaemonTick(): boolean {
-  const script = join(getActiveRepoDir(), 'autoresearch', 'bin', 'queue-daemon.sh');
+  const script = join(process.cwd(), 'tools', 'autoresearch', 'queue-daemon.sh');
   try {
     const out = openSync('/tmp/queue-daemon.log', 'a');
-    const child = spawn('bash', [script, '--once'], {
+    const child = spawn('bash', [script, '--repo', getActiveRepoDir(), '--once'], {
       cwd: getActiveRepoDir(),
       detached: true,
       stdio: ['ignore', out, out],
