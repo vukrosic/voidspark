@@ -22,15 +22,28 @@ autoresearch/
 │   └── NNN-<slug>/
 │       ├── idea.md     # the idea + `status` frontmatter (source of truth)
 │       └── log.jsonl   # one line per status flip (powers Analytics)
-├── prompts/            # one prompt per pipeline stage — read config.json, generic
-│   ├── generate-ideas.md
-│   ├── implement-idea.md
-│   ├── run-idea.md
-│   └── runner.md
-├── bin/
-│   └── flip.sh         # the status state machine (generic — works as-is)
+├── prompts/            # one prompt per AI stage — read config.json, generic
+│   ├── generate-ideas.md   # AI: mine ideas
+│   ├── implement-idea.md   # AI: write the treatment code + run.json
+│   └── setup-box.md        # AI: provision a fresh GPU box
+├── bin/                # the deterministic last mile — NO LLM in the loop
+│   ├── flip.sh         # the status state machine (generic — works as-is)
+│   ├── queue-daemon.sh # drains needs-run on the GPU: run → poll → judge → flip
+│   ├── _box_smoke.py   # CPU build-smoke a stub before spending GPU time
+│   └── baseline.sh     # mean ± noise-band verdict (pure arithmetic)
 └── closed.md           # dedup + closed-idea log
 ```
+
+## Who owns what
+
+**AI** owns the *upstream* gates only — mine ideas, taste, review, and **write
+the treatment code** (`prompts/`). The **GPU last mile is drained by a plain
+script** — [`bin/queue-daemon.sh`](bin/queue-daemon.sh), no LLM in the hot loop.
+Run it as a loop (`queue-daemon.sh --loop 300`) and it claims every `needs-run`
+idea with a valid `run.json`, CPU-smokes it, launches a fail-isolated queue in a
+detached `arq` tmux on the box, polls, judges each result against the baseline
+band, and flips statuses — deterministically and cron-safe. It is repo-agnostic:
+the only coupling is the `drain` block of `config.json`.
 
 ## Statuses an idea moves through
 

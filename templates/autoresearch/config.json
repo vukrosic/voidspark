@@ -10,5 +10,19 @@
   "init_constraint": "<step-0 equivalence rule, e.g. 'zero/identity init — step 0 output byte-identical to baseline'>",
   "model_files": ["<your model file, e.g. model.py>", "<your config file, e.g. config.py>"],
   "results_schema": "remote-results/<date>-<tier>/results.json",
-  "compute": "read autoresearch/remote-box.json (written from VoidSpark → Settings → GPU box)"
+  "compute": "read autoresearch/remote-box.json (written from VoidSpark → Settings → GPU box)",
+
+  "drain": {
+    "_comment": "Repo-specifics for bin/queue-daemon.sh — the deterministic GPU drainer (no LLM). Every field is optional; omit to keep the built-in defaults.",
+    "remote_tmux": "arq",
+    "baseline_config": "configs.llm_config.BaselineConfig — the OFF/flag-off control config class the daemon runs for the baseline bracket",
+    "dataset_path": "processed_data/your_dataset",
+    "ctrl_command": "python train.py --config_class {config} --seed {seed} --dataset_path {dataset} --warmup false",
+    "smoke": {
+      "_comment": "CPU build-smoke: construct the model from each stub's `C` config before spending GPU time.",
+      "trainer": "train — the module name whose .main() each _arq stub must call (guards against fake main.py/train.py entrypoints)",
+      "model_import": "from models.model import YourModel",
+      "model_ctor": "YourModel"
+    }
+  }
 }
