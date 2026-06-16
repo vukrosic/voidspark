@@ -1,8 +1,9 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveAutoresearchDir } from '@/lib/tracks';
 
-const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+const ideasDir = () => join(getActiveAutoresearchDir(), 'ideas');
 
 // When the idea first appeared, in epoch ms — the `ts` on the FIRST line of its
 // log.jsonl (the mine/seed event), which is the true "added" moment. Falls back

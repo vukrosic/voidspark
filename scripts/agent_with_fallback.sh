@@ -24,6 +24,34 @@ PRIMARY="${1:?usage: agent_with_fallback.sh <primary> <fallback> <prompt>}"
 FALLBACK="${2:?fallback cmd required}"
 PROMPT="${3:?prompt required}"
 
+# --- Self-termination guards -------------------------------------------------
+# Two ways this wrapper turns into a zombie CPU hog (observed 2026-06-16: two
+# orphans busy-spun ~90% CPU for 12h after their tmux pane died — the machine's
+# #1 battery drain):
+#   1. Orphaned — the launching pane/daemon dies, we get reparented to launchd
+#      (PID 1) but the poll loop keeps running forever.
+#   2. PID reuse — PRIMARY_PID gets recycled by an unrelated process, so
+#      `kill -0 "$PRIMARY_PID"` never returns false and the loop never ends.
+# Defenses: remember the ORIGINAL parent and bail the instant it's gone, plus a
+# hard wall-clock ceiling as a catch-all. $PPID is fixed at bash startup and does
+# NOT track reparenting, so we test the original parent's liveness explicitly.
+# $SECONDS is a bash builtin (works on macOS bash 3.2). Both overridable via env;
+# set ORPHAN_GUARD=0 for intentionally-detached (nohup/disown) launches.
+START_PPID="$PPID"
+ORPHAN_GUARD="${AGENT_FALLBACK_ORPHAN_GUARD:-1}"
+MAX_WALL="${AGENT_FALLBACK_MAX_WALL:-7200}"   # hard ceiling in seconds (0=off)
+
+# Echo a reason + return 0 when this wrapper should self-terminate, else return 1.
+guard_tripped() {
+  if [ "$ORPHAN_GUARD" = 1 ] && ! kill -0 "$START_PPID" 2>/dev/null; then
+    echo "launching parent (pid $START_PPID) exited — orphaned"; return 0
+  fi
+  if [ "$MAX_WALL" -gt 0 ] && [ "$SECONDS" -ge "$MAX_WALL" ]; then
+    echo "exceeded ${MAX_WALL}s wall-clock"; return 0
+  fi
+  return 1
+}
+
 # Markers that mean "MiniMax is out of tokens / rate-limited", matched live
 # against the streaming output. The real signature (from a 429) is a stream-json
 # line like {... "error_status":429,"error":"rate_limit" ...} plus the Token Plan
@@ -75,6 +103,12 @@ FELL_BACK=0
 RC=0
 # Poll while primary is alive: a marker hit means abort the retry loop NOW.
 while kill -0 "$PRIMARY_PID" 2>/dev/null; do
+  if abort_reason="$(guard_tripped)"; then
+    printf '\n[voidspark] %s — killing agent and exiting\n' "$abort_reason"
+    kill_tree "$PRIMARY_PID" TERM; sleep 1; kill_tree "$PRIMARY_PID" KILL
+    kill "$TAIL_PID" 2>/dev/null || true
+    exit 75   # EX_TEMPFAIL — distinguishes a guard-triggered abort
+  fi
   if grep -qiE "$MARKERS" "$LOG"; then
     printf '\n[voidspark] MiniMax rate-limited / out of tokens — aborting retries, falling back to Codex\n'
     kill_tree "$PRIMARY_PID" TERM
@@ -102,8 +136,19 @@ sleep 0.3
 kill "$TAIL_PID" 2>/dev/null || true
 
 if [ "$FELL_BACK" -eq 1 ]; then
-  run_agent "$FALLBACK" "$PROMPT"
-  RC=$?
+  # Same guard applies here: background the fallback and poll so an orphaned /
+  # runaway codex can't keep us (or itself) spinning forever.
+  run_agent "$FALLBACK" "$PROMPT" &
+  FB_PID=$!
+  while kill -0 "$FB_PID" 2>/dev/null; do
+    if abort_reason="$(guard_tripped)"; then
+      printf '\n[voidspark] %s — killing fallback and exiting\n' "$abort_reason"
+      kill_tree "$FB_PID" TERM; sleep 1; kill_tree "$FB_PID" KILL
+      exit 75
+    fi
+    sleep 1
+  done
+  wait "$FB_PID"; RC=$?
 fi
 
 exit "$RC"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   Cpu,
@@ -30,227 +30,34 @@ import DocumentationView from "@/components/documentation-view";
 import ResearchRecords, { type RecordsData } from "@/components/research-records";
 import HealthBar from "@/components/health-bar";
 import MonitorPanel from "@/components/monitor-panel";
+import TrackSwitcher from "@/components/track-switcher";
+import { IdeaCard } from "@/components/idea-card";
 
-// Which top-level view the sidebar is showing. "home" is the main dashboard
-// (ideas + GPU + finished); "analytics" is the stage-timing view;
-// "documentation" surfaces the hand-written .md files. Clicking the VoidSpark
-// wordmark always returns to "home".
-type View = "home" | "analytics" | "documentation";
-
-type Session = {
-  name: string;
-  created: number;
-  windows: number;
-  agentLabel: string | null;
-  agentCommand: string | null;
-};
-
-type Result = {
-  verdict: string;
-  controlVal: number | null;
-  treatmentVal: number | null;
-  ctrl2Val: number | null;
-  deltaCtrl: number | null;
-  deltaCtrl2: number | null;
-};
-
-type Idea = {
-  id: string;
-  title: string;
-  status: string;
-  plain: string;
-  updated: string;
-  created: number | null; // epoch ms first mined; drives the "added Xago" label
-  path: string;
-  evidencePath: string | null;
-  result: Result | null;
-};
-
-type GpuInfo = {
-  host: string;
-  status: string;
-  tmuxAlive: boolean;
-  gpu: string;
-  logName: string;
-  logTail: string;
-  sshAttach: string;
-};
-
-const IDEAS_PROMPT_PATH = "autoresearch/prompts/generate-ideas.md";
-const IMPLEMENT_PROMPT_PATH = "autoresearch/prompts/implement-idea.md";
-const RUN_PROMPT_PATH = "autoresearch/prompts/run-idea.md";
-const RUNNER_PROMPT_PATH = "autoresearch/prompts/runner.md";
-const SETUP_BOX_PROMPT_PATH = "autoresearch/prompts/setup-box.md";
-const REMOTE_BOX_PATH = "autoresearch/remote-box.json";
-const IMPLEMENT_SESSION_PREFIX = "lab-implement-";
-const RUN_SESSION_PREFIX = "lab-run-";
-
-type GpuUsage = {
-  name: string;
-  utilization: number;
-  memUsed: number;
-  memTotal: number;
-};
-
-const GENERATE_SESSION_PREFIX = "lab-generate";
-
-// Keep in sync with AGENTS in lib/codexLauncher.ts. minimax is the default.
-const AGENT_OPTIONS: { id: string; label: string }[] = [
-  { id: "minimax", label: "MiniMax (cmf)" },
-  { id: "codex", label: "Codex" },
-  // Deterministic GPU drainer (queue-daemon.sh) — no LLM in the run loop. The
-  // gate workers safely fall back to MiniMax; only autorun routes to the daemon.
-  { id: "daemon", label: "Daemon (no-AI GPU)" },
-];
-
-// Human-readable labels + colour for each on-disk pipeline status. The raw
-// status string (what flip.sh writes) stays the source of truth — this only
-// renames them for display, so the jargon ("needs-taste", "needs-recode")
-// reads clearly without touching the agents' state machine. Hover shows raw.
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  "needs-taste": { label: "Proposed", cls: "border-amber-300/25 bg-amber-300/5 text-amber-200/80" },
-  implementing: { label: "Implementing", cls: "border-emerald-300/25 bg-emerald-300/10 text-emerald-200/90" },
-  "needs-run": { label: "Queued · GPU", cls: "border-cyan-300/25 bg-cyan-300/10 text-cyan-200/90" },
-  running: { label: "Running · GPU", cls: "border-sky-300/40 bg-sky-300/15 text-sky-100" },
-  "needs-recode": { label: "Fixing", cls: "border-orange-300/25 bg-orange-300/10 text-orange-200/90" },
-  recoding: { label: "Fixing", cls: "border-orange-300/25 bg-orange-300/10 text-orange-200/90" },
-  "needs-review": { label: "Review", cls: "border-violet-300/25 bg-violet-300/10 text-violet-200/90" },
-  done: { label: "Done", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/70" },
-  rejected: { label: "Rejected", cls: "border-red-300/25 bg-red-300/5 text-red-200/80" },
-  win: { label: "Improved", cls: "border-emerald-400/40 bg-emerald-400/15 text-emerald-200" },
-  null: { label: "No change", cls: "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/60" },
-  drift: { label: "Invalid run", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
-  fail: { label: "Worse", cls: "border-red-400/40 bg-red-400/15 text-red-200" },
-};
-
-// The A/B verdict (from evidence.md) in plain words. "NULL" especially confuses
-// — it does NOT mean failed, it means the change made no measurable difference
-// (the loss delta fell inside the noise band between the two baselines).
-const VERDICT_META: Record<string, { label: string; help: string }> = {
-  WIN: { label: "Improved", help: "Beat the baseline beyond the noise band." },
-  NULL: {
-    label: "No change",
-    help: "No measurable difference — the change neither helped nor hurt (delta within the two-baseline noise band).",
-  },
-  FAIL: { label: "Worse", help: "Did worse than the baseline." },
-  DRIFT: {
-    label: "Invalid run",
-    help: "Baselines disagreed too much — the comparison can't be trusted, not a real result.",
-  },
-};
-function verdictMeta(v: string): { label: string; help: string } {
-  return VERDICT_META[v?.toUpperCase()] ?? { label: v || "—", help: "" };
-}
-
-function statusMeta(s: string): { label: string; cls: string } {
-  return (
-    STATUS_META[s] ?? {
-      label: s,
-      cls: "border-amber-300/20 bg-amber-300/5 text-amber-200/80",
-    }
-  );
-}
-
-// "3s" / "2m 5s" — compact relative age for freshness labels.
-// Compact, low-jitter duration. Seconds only under a minute (live feedback on
-// fresh work); minutes-only up to an hour (no twitchy trailing seconds); then
-// "Hh Mm". Easy to read at a glance — "32m", "2h 5m" — not "32m 14s" ticking.
-// GPU utilization (%) at or below which the box counts as doing no work. An
-// idle 3060 reads ~0%; training pins it to 80–100%, so a small floor cleanly
-// separates "idle" from "training" without flapping on dips between steps.
-const GPU_IDLE_UTIL = 5;
-// Don't surface a momentary idle blip — only show the "gpu idle" timer once the
-// box has been idle continuously for at least this long.
-const GPU_IDLE_MIN_MS = 5_000;
-// A busy blip should not clear the idle clock immediately. Require the GPU to
-// stay above the busy threshold for this long before we say the box is "busy"
-// again and reset the idle timer.
-const GPU_BUSY_MIN_MS = 5_000;
-// The GPU box gets a second, more explicit idle timer in the UI, but only after
-// it's been idle long enough to matter. That keeps brief pauses from blinking
-// in and out of the card.
-const GPU_IDLE_BOX_MIN_MS = 10_000;
-
-function formatAgo(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
-// Statuses that mean an experiment is finished — they show the full training
-// curve and live in the "Finished experiments" section at the bottom.
-const FINISHED_STATUSES = new Set([
-  "done",
-  "win",
-  "null",
-  "drift",
-  "fail",
-  "rejected",
-]);
-
-// Whether a status gets a live "time in this state" timer. Rule, not a fixed
-// list, so any in-flight status (current or future) is covered: every idea is
-// timed EXCEPT needs-taste (Proposed — just waiting to be picked up) and the
-// finished statuses (those show final results, not an elapsed clock).
-const isTimedStatus = (status: string) =>
-  status !== "needs-taste" && !FINISHED_STATUSES.has(status);
-
-type SessionTagKind = "codex" | "minimax" | "claude" | "shell" | "other";
-
-function sessionTagMeta(session: Session): {
-  label: string;
-  title: string;
-  tone: string;
-  kind: SessionTagKind;
-} | null {
-  const explicit = session.agentLabel?.trim();
-  const command = session.agentCommand?.trim() ?? "";
-  const probe = `${explicit ?? ""} ${command}`.trim().toLowerCase();
-  if (!probe) return null;
-
-  const title = command || explicit || session.name;
-  if (probe.includes("codex")) {
-    return {
-      label: "Codex",
-      title,
-      tone: "border-cyan-300/20 bg-cyan-300/[0.06] text-cyan-100/80",
-      kind: "codex",
-    };
-  }
-  if (probe.includes("minimax") || probe.includes("claude-minimax-free")) {
-    return {
-      label: "MiniMax (cmf)",
-      title,
-      tone: "border-amber-300/20 bg-amber-300/[0.06] text-amber-100/80",
-      kind: "minimax",
-    };
-  }
-  if (probe.includes("claude")) {
-    return {
-      label: explicit || "Claude Code",
-      title,
-      tone: "border-violet-300/20 bg-violet-300/[0.06] text-violet-100/80",
-      kind: "claude",
-    };
-  }
-  if (probe.includes("bash") || probe.includes("zsh") || probe.includes("sh")) {
-    return {
-      label: "Shell",
-      title,
-      tone: "border-white/10 bg-white/[0.03] text-[#faf9f6]/55",
-      kind: "shell",
-    };
-  }
-  return {
-    label: explicit || command || session.name,
-    title,
-    tone: "border-white/10 bg-white/[0.03] text-[#faf9f6]/55",
-    kind: "other",
-  };
-}
+import type {
+  View,
+  Session,
+  Idea,
+  GpuInfo,
+  GpuUsage,
+} from "@/lib/dashboard/types";
+import {
+  IDEAS_PROMPT_PATH,
+  IMPLEMENT_PROMPT_PATH,
+  RUN_PROMPT_PATH,
+  RUNNER_PROMPT_PATH,
+  SETUP_BOX_PROMPT_PATH,
+  REMOTE_BOX_PATH,
+  IMPLEMENT_SESSION_PREFIX,
+  RUN_SESSION_PREFIX,
+  GENERATE_SESSION_PREFIX,
+  AGENT_OPTIONS,
+  GPU_IDLE_UTIL,
+  GPU_IDLE_MIN_MS,
+  GPU_BUSY_MIN_MS,
+  GPU_IDLE_BOX_MIN_MS,
+  FINISHED_STATUSES,
+} from "@/lib/dashboard/constants";
+import { formatAgo, sessionTagMeta } from "@/lib/dashboard/format";
 
 export default function LaunchCodexPage() {
   const [view, setView] = useState<View>("home");
@@ -489,6 +296,13 @@ export default function LaunchCodexPage() {
       /* non-fatal — the results sections just stay on their last state */
     }
   }, []);
+
+  // Switching/adding a record track re-points the track-scoped routes (ideas,
+  // records, leaderboard), so pull both fresh views right away.
+  const onTrackChange = useCallback(() => {
+    refreshIdeas();
+    refreshRecords();
+  }, [refreshIdeas, refreshRecords]);
 
   const refreshGpu = useCallback(async () => {
     setGpuLoading(true);
@@ -1949,248 +1763,21 @@ export default function LaunchCodexPage() {
   // Final A/B result under a finished idea. Just the mark (verdict badge) and
   // the numbers — no loss bars, no training curve. The verdict carries the
   // result at a glance; the deltas tell you the size and direction.
-  const Row = ({ label, val }: { label: string; val: number }) => (
-    <>
-      <dt className="text-[#faf9f6]/55">{label}</dt>
-      <dd className="font-mono text-[#faf9f6]/85">{val.toFixed(4)}</dd>
-    </>
-  );
-  const renderResult = (r: Result, stale = false) => {
-    const rows: { label: string; val: number | null }[] = [
-      { label: "Baseline (ctrl)", val: r.controlVal },
-      { label: "Experiment", val: r.treatmentVal },
-      { label: "Baseline (ctrl2)", val: r.ctrl2Val },
-    ];
-    if (rows.every((x) => x.val == null)) return null;
-
-    const verdict = r.verdict || "—";
-    const vColor =
-      verdict === "WIN"
-        ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-200"
-        : verdict === "DRIFT" || verdict === "FAIL"
-          ? "border-red-400/40 bg-red-400/15 text-red-200"
-          : "border-[#faf9f6]/20 bg-white/5 text-[#faf9f6]/60"; // NULL / unknown
-    // For Δ: negative = experiment lower than baseline = better (green).
-    const deltaText = (d: number | null) =>
-      d == null ? "—" : `${d > 0 ? "+" : ""}${d.toFixed(4)}`;
-    const deltaColor = (d: number | null) =>
-      d == null
-        ? "text-[#faf9f6]/40"
-        : d < 0
-          ? "text-emerald-300"
-          : d > 0
-            ? "text-amber-300"
-            : "text-[#faf9f6]/60";
-
-    return (
-      <div
-        className={`mt-3 rounded-lg border px-3 py-3 ${
-          stale ? "border-white/[0.06] bg-black/10 opacity-60" : "border-white/10 bg-black/20"
-        }`}
-      >
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-[#faf9f6]/40">
-            {stale ? "Previous run — re-coding a fix" : "A/B result"}
-          </span>
-          <span
-            title={verdictMeta(verdict).help || verdict}
-            className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${vColor}`}
-          >
-            {verdictMeta(verdict).label}
-          </span>
-        </div>
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
-          {rows.map((row) =>
-            row.val == null ? null : (
-              <Row key={row.label} label={row.label} val={row.val} />
-            )
-          )}
-        </dl>
-        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
-          <span className="text-[#faf9f6]/40">
-            Δ vs ctrl{" "}
-            <span className={`font-mono ${deltaColor(r.deltaCtrl)}`}>
-              {deltaText(r.deltaCtrl)}
-            </span>
-          </span>
-          <span className="text-[#faf9f6]/40">
-            Δ vs ctrl2{" "}
-            <span className={`font-mono ${deltaColor(r.deltaCtrl2)}`}>
-              {deltaText(r.deltaCtrl2)}
-            </span>
-          </span>
-          <span className="text-[#faf9f6]/30">(− = experiment better)</span>
-        </div>
-      </div>
-    );
-  };
-
   // One idea row — the title, status badge, action buttons, and (if the A/B
   // has finished) the verdict + numbers. Used by every grouped list so the
   // cards stay identical wherever they appear.
-  const renderIdeaCard = (
-    idea: Idea,
-    extra?: ReactNode,
-    showResult: boolean = true
-  ) => {
-    const implementSessionName = IMPLEMENT_SESSION_PREFIX + idea.id;
-    const runSessionName = RUN_SESSION_PREFIX + idea.id;
-    const liveImplement = liveSessions.has(implementSessionName);
-    const liveRun = liveSessions.has(runSessionName);
-    const liveSessionName = liveRun ? runSessionName : implementSessionName;
-    const isLive = liveImplement || liveRun;
-    const isTrackedWip =
-      idea.status === "implementing" || idea.status === "running";
-    const isStuck = isTrackedWip && !isLive;
-    const busy = implementing === idea.id;
-    const canImplement = !["needs-run", "running", "done"].includes(idea.status);
-
-    return (
-      <li
-        key={idea.id}
-        className="rounded-md border border-white/10 bg-white/[0.025] px-3 py-2.5"
-      >
-        <div className="flex items-start justify-between gap-3">
-          <button
-            type="button"
-            onClick={() => setOpenFile({ path: idea.path, title: idea.title })}
-            title={`Open ${idea.title}`}
-            className="min-w-0 flex-1 text-left transition hover:opacity-80 focus:outline-none"
-          >
-            <p className="truncate text-sm font-semibold text-[#faf9f6]">
-              {idea.title}
-            </p>
-            {idea.plain && (
-              <p className="mt-1 line-clamp-2 text-xs text-[#faf9f6]/55">{idea.plain}</p>
-            )}
-          </button>
-          <div className="flex shrink-0 flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              {isLive && (
-                <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.15em] text-emerald-300">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-                  {liveRun ? "gpu" : "working"}
-                </span>
-              )}
-              {isStuck && (
-                <span className="text-[10px] uppercase tracking-[0.15em] text-orange-300">
-                  stuck
-                </span>
-              )}
-              {isTimedStatus(idea.status) && timeInState(idea.updated) && (
-                <span
-                  title={`in this state for ${timeInState(idea.updated)} · since ${localTime(idea.updated)}`}
-                  className="font-mono text-[10px] tabular-nums text-[#faf9f6]/40"
-                >
-                  {timeInState(idea.updated)}
-                </span>
-              )}
-              <span
-                title={idea.status}
-                className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusMeta(idea.status).cls}`}
-              >
-                {statusMeta(idea.status).label}
-              </span>
-            </div>
-            {idea.created != null && (
-              <span
-                title={`first mined ${localTime(new Date(idea.created).toISOString())}`}
-                className="font-mono text-[10px] tabular-nums text-[#faf9f6]/30"
-              >
-                added {formatAgo(now - idea.created)} ago
-              </span>
-            )}
-            <div className="flex items-center gap-2">
-              {idea.evidencePath && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenFile({
-                      path: idea.evidencePath!,
-                      title: `${idea.title} — evidence`,
-                    })
-                  }
-                  title={`Open evidence for ${idea.title}`}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-fuchsia-300/25 bg-fuchsia-300/[0.07] px-2 text-[11px] font-medium text-fuchsia-200 transition hover:border-fuchsia-300/50 hover:bg-fuchsia-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-fuchsia-300/35"
-                >
-                  <FileText className="h-3.5 w-3.5" aria-hidden />
-                  Evidence
-                </button>
-              )}
-              {isStuck && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleReset(
-                      idea.id,
-                      idea.status === "running" ? "needs-run" : "needs-taste",
-                      idea.status === "running"
-                        ? "requeued stuck GPU run from UI"
-                        : "reset stuck idea from UI"
-                    )
-                  }
-                  disabled={busy}
-                  title={
-                    idea.status === "running"
-                      ? "Requeue this stuck GPU run"
-                      : "Reset this stuck idea back to Proposed"
-                  }
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-orange-400/25 bg-orange-400/[0.07] px-2 text-[11px] font-medium text-orange-300 transition hover:border-orange-400/50 hover:bg-orange-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-orange-400/35 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" aria-hidden />
-                  {idea.status === "running" ? "Requeue" : "Reset"}
-                </button>
-              )}
-              {isLive ? (
-                <button
-                  type="button"
-                  onClick={() => handleAttach(liveSessionName)}
-                  disabled={attaching === liveSessionName}
-                  title={`Attach to ${liveSessionName}`}
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-cyan-300/25 bg-cyan-300/[0.07] px-2 text-[11px] font-medium text-cyan-200 transition hover:border-cyan-300/50 hover:bg-cyan-300/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-cyan-300/35 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {attaching === liveSessionName ? (
-                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                  ) : (
-                    <Terminal className="h-3.5 w-3.5" aria-hidden />
-                  )}
-                  Attach
-                </button>
-              ) : (canImplement && !autoImplementOn) ||
-                (isStuck && idea.status !== "running") ? (
-                // When auto-implement is on, the normal "Implement" run-once
-                // button is hidden (the tick handles Proposed ideas); the stuck
-                // "Retry" recovery button still shows.
-                <button
-                  type="button"
-                  onClick={() => handleImplement(idea.id)}
-                  disabled={busy}
-                  title={
-                    isStuck
-                      ? "Retry this idea with a fresh implementation pass"
-                      : "Implement this idea now"
-                  }
-                  className="inline-flex h-7 items-center gap-1.5 rounded-md border border-emerald-400/25 bg-emerald-400/[0.07] px-2 text-[11px] font-medium text-emerald-300 transition hover:border-emerald-400/50 hover:bg-emerald-400/[0.12] hover:text-white focus:outline-none focus:ring-2 focus:ring-emerald-400/35 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {busy ? (
-                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-hidden />
-                  ) : (
-                    <Zap className="h-3.5 w-3.5" aria-hidden />
-                  )}
-                  {busy ? "Launching…" : isStuck ? "Retry" : "Implement"}
-                </button>
-              ) : idea.status === "needs-run" ? (
-                <span className="inline-flex h-7 items-center rounded-md border border-cyan-300/20 bg-cyan-300/5 px-2 text-[11px] font-medium text-cyan-200/70">
-                  Queued
-                </span>
-              ) : null}
-            </div>
-          </div>
-        </div>
-        {showResult && idea.result && renderResult(idea.result, !FINISHED_STATUSES.has(idea.status))}
-        {extra}
-      </li>
-    );
+  // Props every IdeaCard needs from this component's live state/handlers.
+  // Spread into each <IdeaCard> so the two call sites stay in sync.
+  const ideaCardShared = {
+    liveSessions,
+    implementing,
+    attaching,
+    autoImplementOn,
+    now,
+    onOpenFile: setOpenFile,
+    onReset: handleReset,
+    onImplement: handleImplement,
+    onAttach: handleAttach,
   };
 
   return (
@@ -2781,7 +2368,15 @@ export default function LaunchCodexPage() {
         ) : hasProject ? (
         <>
 
+        {/* Record-track switcher — scopes the ideas, records, and leaderboard
+            below to the active track. Add/switch independent research tracks. */}
+        <div className="mt-8 flex w-full max-w-4xl justify-start">
+          <TrackSwitcher onChange={onTrackChange} />
+        </div>
+
         {/* ================= SECTION 1 · IDEAS ================= */}
+        {/* Hidden in Simple mode — the records board + GPU status lead instead. */}
+        {advanced && (
         <section className="mt-12 w-full max-w-4xl">
           <div className="mb-4 flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-2.5">
@@ -2941,7 +2536,9 @@ export default function LaunchCodexPage() {
                       )}
                     </button>
                     <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {visibleIdeas.map((idea) => renderIdeaCard(idea))}
+                      {visibleIdeas.map((idea) => (
+                        <IdeaCard key={idea.id} idea={idea} {...ideaCardShared} />
+                      ))}
                     </ul>
                     {hiddenCount > 0 && (
                       <button
@@ -2971,6 +2568,7 @@ export default function LaunchCodexPage() {
 	          </div>
 	          )}
         </section>
+        )}
 
         {/* ================= SECTION 2 · GPU RUNS ================= */}
         <section className="mt-16 w-full max-w-4xl">
@@ -3593,6 +3191,8 @@ export default function LaunchCodexPage() {
 	        </section>
 
 	        {/* ================= SECTION 3 · OTHER SESSIONS ================= */}
+	        {/* Hidden in Simple mode — raw tmux sessions are a power-user surface. */}
+	        {advanced && (
 	        <section className="mt-16 w-full max-w-4xl">
 	          <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
 	            <div className="flex min-w-0 items-center gap-2.5">
@@ -3626,11 +3226,14 @@ export default function LaunchCodexPage() {
 
           {renderSessionList(otherSessions, "No other tmux sessions.")}
         </section>
+        )}
 
         {/* ===== SECTION 4 · RECORD TIMELINE (lead of the results view) ===== */}
         <ResearchRecords data={recordsApi} />
 
 	        {/* ===== SECTION 5 · ALL EXPERIMENTS (merged: ran + closed, filtered) ===== */}
+	        {/* Hidden in Simple mode — collapses the long experiment log. */}
+	        {advanced && (
 	        <section className="mt-12 w-full max-w-4xl">
 	          <div className="mb-4 flex items-center justify-between gap-3 border-b border-white/10 pb-4">
 	            <div className="flex min-w-0 items-center gap-2.5">
@@ -3684,7 +3287,9 @@ export default function LaunchCodexPage() {
           ) : (
             <>
               <ul className="space-y-2">
-                {ideaShown.map((idea) => renderIdeaCard(idea, undefined, false))}
+                {ideaShown.map((idea) => (
+                  <IdeaCard key={idea.id} idea={idea} showResult={false} {...ideaCardShared} />
+                ))}
                 {closedShownExp.map((c, i) => {
                   const isReject = closedBucket(c.verdict) === "reject";
                   return (
@@ -3737,6 +3342,7 @@ export default function LaunchCodexPage() {
             </>
           )}
         </section>
+        )}
         </>
         ) : null}
       </div>

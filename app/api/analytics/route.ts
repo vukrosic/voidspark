@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir } from '@/lib/projects';
+import { getActiveAutoresearchDir } from '@/lib/tracks';
 
 // ---- Pipeline analytics -----------------------------------------------------
 // Every status flip is appended to `autoresearch/ideas/<id>/log.jsonl` by
@@ -17,10 +17,10 @@ import { getActiveRepoDir } from '@/lib/projects';
 // implementing) yields multiple segments — each is its own sample, so the
 // deviation reflects real variance, not an average of averages.
 
-const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+const ideasDir = () => join(getActiveAutoresearchDir(), 'ideas');
 // Finished ideas are moved here to declutter the live queue. Analytics still
 // reads them so stage-timing history covers the whole pipeline, not just active work.
-const archiveDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas-archive');
+const archiveDir = () => join(getActiveAutoresearchDir(), 'ideas-archive');
 
 // Terminal states: reaching one ends an idea's pipeline. End-to-end time is
 // measured from the first event to the first terminal event.

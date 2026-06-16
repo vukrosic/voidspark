@@ -1,6 +1,7 @@
 import { readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveAutoresearchDir } from '@/lib/tracks';
 
 // ---- Research records & closed experiments ----------------------------------
 // `autoresearch/closed.md` is the loop's live ledger: the reviewer/run step
@@ -18,10 +19,10 @@ import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 // parsed WINs to `autoresearch/records.jsonl` on each call — idempotent, so the
 // machine-readable record history stays in sync with closed.md automatically.
 
-const repo = () => getActiveRepoDir();
-const closedPath = () => join(repo(), 'autoresearch', 'closed.md');
-const ledgerPath = () => join(repo(), 'autoresearch', 'records.jsonl');
-const baselineCachePath = () => join(repo(), 'autoresearch', 'baseline-cache.json');
+const arDir = () => getActiveAutoresearchDir();
+const closedPath = () => join(arDir(), 'closed.md');
+const ledgerPath = () => join(arDir(), 'records.jsonl');
+const baselineCachePath = () => join(arDir(), 'baseline-cache.json');
 
 // The current-box baseline (from the Phase-2 baseline cache). The record board
 // is reset to THIS box's era: the "record to beat" is the clean baseline mean,

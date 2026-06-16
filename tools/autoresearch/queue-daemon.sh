@@ -516,11 +516,23 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # promoted 209 (6.2519) over the alibi champion (6.2403, Δ+0.012 = a NULL). When
   # a champion is defined we pin the bar to its val so a WIN must beat the champion,
   # never a stray base measurement. (band stays the noise band; default 0.04.)
-  # ⚠️ The 0.04 default is 2σ of CROSS-BOX drift, not paired within-session noise
-  # (1σ≈0.017). It hides real +0.01–0.02 stacking wins — see NOISE-AND-BAND.md.
+  # ── SCREEN band, NOT a promotion band ────────────────────────────────────
+  # This verdict is a 1-seed SCREEN whose only outcomes are: NULL (done) or
+  # SCREEN-WIN (→ needs-confirm). Since the lucky-seed guard, NOTHING auto-
+  # promotes here — every win must clear a PAIRED 3-seed confirm (band 0.018,
+  # same-box same-session, drift-free) before becoming champion. So the screen's
+  # job is sensitivity (don't lose a real win), and the paired confirm provides
+  # the specificity (kill flukes). The old 0.04 (=2σ of CROSS-BOX drift) made the
+  # screen so deaf that real +0.01–0.02 stacking wins read NULL and never reached
+  # the confirm that would validate them — the lab's core blindness (NOISE-AND-
+  # BAND.md). We set the SCREEN gate to ~1σ of within-session noise (0.02) so
+  # those wins surface as needs-confirm. Loosening this can only OFFER a candidate
+  # for confirmation; it can never promote a fluke (the paired confirm does that).
+  # Override unconditionally: the per-box cache returns band=0.04, which would
+  # otherwise win over the default below. Env SCREEN_BAND tunes it.
   if [ -n "$CHAMPION_VAL" ] && awk -v v="$CHAMPION_VAL" 'BEGIN{exit !(v+0>0)}'; then
     mean="$CHAMPION_VAL"
-    awk -v b="$band" 'BEGIN{exit !(b+0>0)}' || band="${CHAMPION_BAND:-0.04}"
+    band="${SCREEN_BAND:-0.02}"
   fi
   # ── leak guard (runs BEFORE the verdict) ─────────────────────────────────
   # A val far below the baseline neighborhood is never a win — it's a broken
@@ -756,6 +768,12 @@ WRAP
 # ── one full tick ────────────────────────────────────────────────────────────
 tick() {
   load_box || { log "skipping tick — no box"; return 0; }
+  # Re-read champion.json EVERY tick so a manual promotion (hand-edited
+  # champion.json) takes effect without a daemon restart. Without this the
+  # daemon caches CHAMPION_VAL from startup forever, so a manual re-pin (e.g.
+  # deepnet 6.2539→6.2367) silently keeps judging treatments against the STALE
+  # bar — the exact bug that mislabeled 264/267 as NULL against 6.2539.
+  load_champion
   # Reachability guard FIRST: a transient ssh blip must be a no-op, never a
   # reason to claim ideas and then bounce them all to needs-recode on failed scp.
   if ! box_reachable; then log "box $HOST:$PORT unreachable — skipping tick (no claims)"; return 0; fi

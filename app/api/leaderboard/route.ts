@@ -1,6 +1,7 @@
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveAutoresearchDir } from '@/lib/tracks';
 
 // ---- Finished Experiments Leaderboard --------------------------------------
 // The leaderboard only shows ideas that have a verdict — i.e. the human
@@ -11,7 +12,7 @@ import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 // The page does its own sort + verdict filter on the client; this route just
 // gives it a stable, flat shape so the UI doesn't have to re-parse markdown.
 
-const ideasDir = () => join(getActiveRepoDir(), 'autoresearch', 'ideas');
+const ideasDir = () => join(getActiveAutoresearchDir(), 'ideas');
 
 type LeaderboardRow = {
   id: string;
