@@ -78,7 +78,43 @@ type ClosedEvent = {
   note: string; // the full human reason, trimmed
 };
 
-type RecordEvent = ClosedEvent & { runningBest: number | null; improved: boolean };
+type RecordEvent = ClosedEvent & {
+  runningBest: number | null;
+  improved: boolean;
+  summary: string; // one plain-English sentence: what this record actually changed
+};
+
+// Curated one-sentence, jargon-light explanations of each record — what the lever
+// actually *does*, for readers who don't know the codebase. Keyed by slug. New
+// records fall back to `deriveSummary` (extracts the mechanism clause from the
+// closed.md note) until a curated line is added here.
+const RECORD_SUMMARIES: Record<string, string> = {
+  '253-deepnet-alpha-alibi':
+    'Scaled down each layer’s contribution to the residual stream (DeepNet-style) so the deep stack trains stably — with zero new parameters.',
+  '267-deepnet-poly-alibi':
+    'Gave every attention head its own linear-plus-quadratic decay with distance on top of ALiBi, so each head can tune how sharply it focuses on nearby tokens.',
+  '296-champion-slope-curvature-combo':
+    'Pre-set both the ALiBi slope and its curvature at the start of training, so the “pay attention to nearby words” prior is already correct from the first step.',
+  '323-mom0p90-lr2x':
+    'Doubled the peak learning rate and eased Muon’s momentum to 0.90 — the tiny model was under-trained in its short run, so bolder updates helped.',
+};
+
+// Fallback: pull the mechanism description out of the dense closed.md note (drop
+// the leading “trt=… vs ctrl… (Δ…)” stats and keep the first real clause).
+function deriveSummary(note: string): string {
+  let s = note
+    .replace(/trt\s*[=\s]\s*[0-9.]+/i, '')
+    .replace(/\bvs\b[^;.]*?\([^)]*\)/gi, '')
+    .replace(/\bat tiny1m3m\b/gi, '')
+    .replace(/^[\s—–\-:,;]+/, '')
+    .trim();
+  s = s.split(/[;.](?:\s|$)/)[0].trim();
+  if (s.length > 170) s = s.slice(0, 167).trimEnd() + '…';
+  return s;
+}
+
+const summarize = (slug: string, note: string): string =>
+  RECORD_SUMMARIES[slug] ?? deriveSummary(note);
 
 // Split on the line's separator — closed.md mixes em-dash " — " and " -- ".
 const SEP = /\s+(?:—|--)\s+/;
@@ -162,7 +198,7 @@ export async function POST() {
     if (!inEra(ev.date)) continue;
     const improved = ev.val != null && (best == null || ev.val < best);
     if (ev.val != null && (best == null || ev.val < best)) best = ev.val;
-    records.push({ ...ev, runningBest: best, improved });
+    records.push({ ...ev, runningBest: best, improved, summary: summarize(ev.slug, ev.note) });
   }
 
   // Cross-box wins from before this baseline era — kept for context, shown

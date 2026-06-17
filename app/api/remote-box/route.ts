@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
-import { join, dirname } from 'path';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { dirname } from 'path';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveRemoteBoxReadPath, getActiveRemoteBoxWritePath } from '@/lib/tracks';
 
 // ---- GPU box (Vast.ai) connection -------------------------------------------
 // Friendly read/write of the active repo's autoresearch/remote-box.json — the
@@ -16,8 +17,9 @@ import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const boxPath = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
-
+// Read resolves the active track's own box (falling back to the project box);
+// write always targets the active track's own file, so saving a box while
+// viewing a sub-track creates that track's box instead of clobbering main's.
 type RemoteBox = {
   provider?: string;
   ssh?: string;
@@ -51,7 +53,7 @@ function parseSsh(ssh: string): { host: string; port: number; user: string } | n
 
 async function readBox(): Promise<RemoteBox> {
   try {
-    return JSON.parse(await readFile(boxPath(), 'utf8')) as RemoteBox;
+    return JSON.parse(await readFile(getActiveRemoteBoxReadPath(), 'utf8')) as RemoteBox;
   } catch {
     return {};
   }
@@ -114,8 +116,9 @@ export async function POST(req: Request) {
   }
 
   try {
-    await mkdir(dirname(boxPath()), { recursive: true });
-    await writeFile(boxPath(), JSON.stringify(next, null, 2) + '\n', 'utf8');
+    const writePath = getActiveRemoteBoxWritePath();
+    await mkdir(dirname(writePath), { recursive: true });
+    await writeFile(writePath, JSON.stringify(next, null, 2) + '\n', 'utf8');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ ok: false, error: `Couldn't write remote-box.json: ${message}` }, { status: 200 });

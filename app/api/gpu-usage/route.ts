@@ -1,11 +1,12 @@
 import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
 import { promisify } from 'util';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveRemoteBoxReadPath } from '@/lib/tracks';
 
 const execFileAsync = promisify(execFile);
-const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
+// Per-track: the active track's own box if it has one, else the project box.
+const REMOTE_BOX_PATH = () => getActiveRemoteBoxReadPath();
 
 // Deliberately tiny sibling of /api/gpu: this route asks the box for ONLY the
 // live GPU usage numbers (util %, VRAM used/total) so the UI can poll it on a

@@ -52,3 +52,6 @@ next-env.d.ts
 .active-project
 projects.json
 .queue-daemon.log
+
+# runtime log
+tools/autoresearch/queue-daemon.log

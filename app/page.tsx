@@ -31,6 +31,7 @@ import ResearchRecords, { type RecordsData } from "@/components/research-records
 import HealthBar from "@/components/health-bar";
 import MonitorPanel from "@/components/monitor-panel";
 import TrackSwitcher from "@/components/track-switcher";
+import TrackBrief from "@/components/track-brief";
 import { IdeaCard } from "@/components/idea-card";
 
 import type {
@@ -297,11 +298,16 @@ export default function LaunchCodexPage() {
     }
   }, []);
 
+  // Bumped on every track switch/create so the brief panel re-fetches the active
+  // track's brief.md (the records/ideas routes are already re-pulled below).
+  const [trackNonce, setTrackNonce] = useState(0);
+
   // Switching/adding a record track re-points the track-scoped routes (ideas,
-  // records, leaderboard), so pull both fresh views right away.
+  // records, leaderboard, brief), so pull all fresh views right away.
   const onTrackChange = useCallback(() => {
     refreshIdeas();
     refreshRecords();
+    setTrackNonce((n) => n + 1);
   }, [refreshIdeas, refreshRecords]);
 
   const refreshGpu = useCallback(async () => {
@@ -2374,6 +2380,16 @@ export default function LaunchCodexPage() {
           <TrackSwitcher onChange={onTrackChange} />
         </div>
 
+        {/* Active track's research brief (brief.md) — what this track is
+            researching, the question, scope, and its GPU box. Hidden when the
+            track has no brief. Edit hands the path to the shared MarkdownPanel. */}
+        <div className="mt-4 flex w-full max-w-4xl justify-start">
+          <TrackBrief
+            reloadSignal={trackNonce}
+            onOpen={(path, title) => setOpenFile({ path, title })}
+          />
+        </div>
+
         {/* ================= SECTION 1 · IDEAS ================= */}
         {/* Hidden in Simple mode — the records board + GPU status lead instead. */}
         {advanced && (
@@ -2874,7 +2890,10 @@ export default function LaunchCodexPage() {
             )}
           </div>
 
-          {gpuQueue.length === 0 ? (
+          {/* Queue rows are an advanced-only surface — Simple view keeps just the
+              header counts/timers + master switch above, and the live GPU charts
+              in the box below. */}
+          {advanced && (gpuQueue.length === 0 ? (
             <p className="mt-4 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-5 text-center text-sm text-[#faf9f6]/40">
               No ready GPU work.
             </p>
@@ -2998,7 +3017,7 @@ export default function LaunchCodexPage() {
                 </button>
               )}
             </>
-          )}
+          ))}
 	        </div>
 
 	        {/* GPU box — the real training, in tmux `arq` on the remote Vast box */}

@@ -8,9 +8,13 @@ const ROOT = () => getActiveRepoDir();
 
 function safeResolve(relPath: string): string | null {
   if (!relPath || typeof relPath !== 'string') return null;
-  const full = resolve(ROOT(), relPath);
-  // Must stay inside ROOT() and be a markdown file.
-  if (full !== ROOT() && !full.startsWith(ROOT() + sep)) return null;
+  // Normalize the root first: a stored repo path with a trailing slash would
+  // otherwise make `root + sep` a double-slash and fail the startsWith check
+  // below for every path. resolve() strips the trailing separator.
+  const root = resolve(ROOT());
+  const full = resolve(root, relPath);
+  // Must stay inside root and be a markdown file.
+  if (full !== root && !full.startsWith(root + sep)) return null;
   if (!full.endsWith('.md')) return null;
   return full;
 }

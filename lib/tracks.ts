@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync } from 'fs';
+import { readFileSync, mkdirSync, existsSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { getActiveRepoDir } from './projects';
@@ -71,6 +71,28 @@ export function getActiveAutoresearchDir(): string {
   return active === 'main' ? base : join(base, 'tracks', active);
 }
 
+// ---- Per-track GPU box ------------------------------------------------------
+// Each track can bind its OWN remote-box.json (so the GPU panel shows that
+// thread's box), falling back to the project-level box when the track hasn't set
+// one. This is display/connection scope only — the queue-daemon is NOT
+// track-aware and always drives main's box, so per-track boxes never collide
+// with the main loop.
+//
+// READ resolves the active track's own box if present, else the project box
+// (main's). For the main track the two paths are identical. WRITE always targets
+// the active track's own file, so saving a box while viewing a sub-track creates
+// that track's box instead of clobbering main's.
+const projectRemoteBoxPath = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
+
+export function getActiveRemoteBoxWritePath(): string {
+  return join(getActiveAutoresearchDir(), 'remote-box.json');
+}
+
+export function getActiveRemoteBoxReadPath(): string {
+  const trackBox = getActiveRemoteBoxWritePath();
+  return existsSync(trackBox) ? trackBox : projectRemoteBoxPath();
+}
+
 function slugify(s: string): string {
   return (
     s
@@ -132,4 +154,29 @@ export async function setActiveTrack(rawId: unknown): Promise<boolean> {
   if (!state.tracks.some((t) => t.id === id)) return false;
   await writeState({ ...state, active: id });
   return true;
+}
+
+export type DeleteTrackResult =
+  | { ok: true; state: TracksState }
+  | { ok: false; error: 'invalid-id' | 'is-main' | 'unknown-id' };
+
+// De-register a track WITHOUT deleting its data. The track disappears from the
+// switcher, but its on-disk folder (autoresearch/tracks/<id>/ — ideas, closed.md,
+// records.jsonl, baseline-cache.json, brief.md) is left fully intact: the
+// experiments survive. This is intentional — "delete the thread, keep the
+// experiments". Re-creating a track with the same name re-scaffolds a fresh
+// folder; the orphaned data stays on disk until removed by hand. "main" can
+// never be deleted; deleting the active track falls back to main.
+export async function deleteTrack(rawId: unknown): Promise<DeleteTrackResult> {
+  const id = typeof rawId === 'string' ? rawId.trim() : '';
+  if (!id) return { ok: false, error: 'invalid-id' };
+  if (id === 'main') return { ok: false, error: 'is-main' };
+  const state = readState();
+  if (!state.tracks.some((t) => t.id === id)) return { ok: false, error: 'unknown-id' };
+
+  const tracks = state.tracks.filter((t) => t.id !== id);
+  const active = state.active === id ? 'main' : state.active;
+  const next: TracksState = { active, tracks };
+  await writeState(next);
+  return { ok: true, state: next };
 }

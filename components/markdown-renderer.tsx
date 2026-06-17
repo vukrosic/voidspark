@@ -107,7 +107,32 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
           // Custom image handling with Next.js Image optimization
           img: ({ src, alt }) => {
             if (!src) return null;
-            
+
+            // SVG charts, data URIs, and figures served from /figures render
+            // through a plain <img>. next/image blocks SVG (needs
+            // dangerouslyAllowSVG) and chokes on data URIs, so route those
+            // here — the panel just needs to SHOW them, not optimize them.
+            const s = typeof src === 'string' ? src : '';
+            const isPlain =
+              s.endsWith('.svg') || s.startsWith('data:') || s.startsWith('/figures/');
+            if (isPlain) {
+              return (
+                <span className="block my-8">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={s}
+                    alt={alt || ''}
+                    className="w-full h-auto rounded-lg border border-gray-700 bg-[#1f1e1d]"
+                  />
+                  {alt && (
+                    <span className="block text-center text-sm text-gray-400 mt-2">
+                      {alt}
+                    </span>
+                  )}
+                </span>
+              );
+            }
+
             // Check if this is the architecture comparison diagram that should be larger
             const isArchitectureComparison = alt?.includes('SD-VAE vs RAE') || (typeof src === 'string' && src.includes('architecture-comparison'));
             // Check if this is other architecture diagrams that should be smaller

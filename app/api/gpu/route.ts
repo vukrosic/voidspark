@@ -1,11 +1,12 @@
 import { execFile } from 'child_process';
 import { readFile } from 'fs/promises';
-import { join } from 'path';
 import { promisify } from 'util';
-import { getActiveRepoDir, hasActiveRepo } from '@/lib/projects';
+import { hasActiveRepo } from '@/lib/projects';
+import { getActiveRemoteBoxReadPath } from '@/lib/tracks';
 
 const execFileAsync = promisify(execFile);
-const REMOTE_BOX_PATH = () => join(getActiveRepoDir(), 'autoresearch', 'remote-box.json');
+// Per-track: the active track's own box if it has one, else the project box.
+const REMOTE_BOX_PATH = () => getActiveRemoteBoxReadPath();
 
 // The actual GPU training runs inside a detached tmux session named `arq` on
 // the remote Vast box (see autoresearch/prompts/run-idea.md). This route SSHes

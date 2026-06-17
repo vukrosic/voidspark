@@ -21,6 +21,7 @@ export type RecordEvent = {
   note: string;
   runningBest: number | null;
   improved: boolean;
+  summary?: string;
 };
 
 export type ClosedEvent = {
@@ -56,6 +57,17 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
 
   const { records, archivedRecords, bestVal, baseline } = data;
 
+  // Show every in-era WIN as a node on the timeline — the record progression on
+  // this box. The standing record-holder (the win whose val == the current best)
+  // is marked ★; earlier in-era wins that didn't end up as the record still show
+  // (they won their A/B), so the path baseline → … → record is visible. The
+  // baseline is pinned to the champion's val, so its row and the ★ holder share
+  // the same number — that's intentional (it names WHICH run holds the record),
+  // not a duplicate. Cross-box wins stay in the archived disclosure (not
+  // comparable to this box's baseline).
+  const isRecord = (r: RecordEvent) =>
+    r.val != null && bestVal != null && Math.abs(r.val - bestVal) < 1e-9;
+
   return (
     <section className="mt-16 w-full max-w-2xl">
       <div className="mb-5 flex items-end justify-between gap-3 border-b border-yellow-300/20 pb-3">
@@ -79,26 +91,6 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
           </span>
         )}
       </div>
-
-      {/* The standing baseline this board is reset to. */}
-      {baseline && (
-        <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3 text-[11px]">
-          <span className="font-semibold uppercase tracking-[0.18em] text-[#faf9f6]/55">
-            Record to beat
-          </span>
-          <span className="font-mono tabular-nums text-yellow-100">
-            {baseline.val.toFixed(4)}
-          </span>
-          <span className="font-mono tabular-nums text-[#faf9f6]/35">
-            ±{baseline.band.toFixed(3)} band
-          </span>
-          {baseline.gpu && (
-            <span className="text-[#faf9f6]/35">
-              · {baseline.gpu} baseline · since {baseline.eraStart}
-            </span>
-          )}
-        </div>
-      )}
 
       {!baseline && records.length === 0 ? (
         <p className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-6 text-center text-sm text-[#faf9f6]/45">
@@ -134,7 +126,7 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
             <li className="relative">
               <span className="absolute -left-[1.42rem] top-2 h-2.5 w-2.5 rounded-full border border-dashed border-white/25 bg-transparent" />
               <p className="px-4 py-2 text-[11px] text-[#faf9f6]/40">
-                No win has beaten the baseline yet — the next record lands here.
+                No win recorded on this box yet — the next record lands here.
               </p>
             </li>
           )}
@@ -142,21 +134,21 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
             <li key={`${r.slug}-${i}`} className="relative">
               <span
                 className={`absolute -left-[1.42rem] top-2 h-2.5 w-2.5 rounded-full border ${
-                  r.improved
+                  isRecord(r)
                     ? "border-yellow-300 bg-yellow-300"
                     : "border-white/25 bg-[#1f1e1d]"
                 }`}
               />
               <div
                 className={`rounded-xl border px-4 py-3 ${
-                  r.improved
+                  isRecord(r)
                     ? "border-yellow-300/25 bg-yellow-300/[0.05]"
                     : "border-white/10 bg-white/[0.02]"
                 }`}
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="truncate text-sm font-semibold text-[#faf9f6]">
-                    {r.improved && <span className="mr-1 text-yellow-300">★</span>}
+                    {isRecord(r) && <span className="mr-1 text-yellow-300">★</span>}
                     {r.slug}
                   </span>
                   <span className="shrink-0 font-mono text-xs tabular-nums text-[#faf9f6]/45">
@@ -176,6 +168,11 @@ export default function ResearchRecords({ data }: { data: RecordsData | null }) 
                     </span>
                   )}
                 </div>
+                {r.summary && (
+                  <p className="mt-2 text-[12px] leading-snug text-[#faf9f6]/60">
+                    {r.summary}
+                  </p>
+                )}
               </div>
             </li>
           ))}

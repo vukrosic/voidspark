@@ -53,6 +53,39 @@ export default function TrackSwitcher({ onChange }: { onChange?: () => void }) {
     [active, busy, onChange]
   );
 
+  // De-register a track. The server keeps the track's folder (ideas, records,
+  // brief) on disk — only the registry entry goes — so this never destroys
+  // experiments. Confirm spells that out so a delete isn't mistaken for a wipe.
+  const remove = useCallback(
+    async (t: Track) => {
+      if (busy || t.id === "main") return;
+      const ok = window.confirm(
+        `Delete the "${t.name}" thread?\n\n` +
+          `It's removed from the switcher, but its experiments and records stay ` +
+          `on disk (autoresearch/tracks/${t.id}/). Nothing is wiped — re-add the ` +
+          `track later to bring them back.`
+      );
+      if (!ok) return;
+      setBusy(true);
+      try {
+        const res = await fetch("/api/tracks/", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "delete", id: t.id }),
+        });
+        const d = await res.json();
+        if (d.ok) {
+          setTracks(Array.isArray(d.tracks) ? d.tracks : []);
+          setActive(typeof d.active === "string" ? d.active : "main");
+          onChange?.();
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [busy, onChange]
+  );
+
   const create = useCallback(async () => {
     const n = name.trim();
     if (!n || busy) return;
@@ -87,22 +120,41 @@ export default function TrackSwitcher({ onChange }: { onChange?: () => void }) {
       </span>
       {tracks.map((t) => {
         const on = t.id === active;
+        const deletable = t.id !== "main";
         return (
-          <button
+          <span
             key={t.id}
-            type="button"
-            onClick={() => select(t.id)}
-            disabled={busy}
-            title={on ? `Active track: ${t.name}` : `Switch to ${t.name}`}
-            className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-3 text-[11px] font-medium transition focus:outline-none disabled:opacity-60 ${
+            className={`group inline-flex h-7 items-center rounded-full border text-[11px] font-medium transition ${
               on
                 ? "border-emerald-400/40 bg-emerald-400/15 text-emerald-100"
-                : "border-white/10 bg-white/[0.03] text-[#faf9f6]/60 hover:border-white/20 hover:text-[#faf9f6]/90"
+                : "border-white/10 bg-white/[0.03] text-[#faf9f6]/60 hover:border-white/20"
             }`}
           >
-            {on && <Check className="h-3 w-3" aria-hidden />}
-            {t.name}
-          </button>
+            <button
+              type="button"
+              onClick={() => select(t.id)}
+              disabled={busy}
+              title={on ? `Active track: ${t.name}` : `Switch to ${t.name}`}
+              className={`inline-flex h-7 items-center gap-1.5 rounded-full px-3 transition focus:outline-none disabled:opacity-60 ${
+                on ? "" : "hover:text-[#faf9f6]/90"
+              } ${deletable ? "pr-1.5" : ""}`}
+            >
+              {on && <Check className="h-3 w-3" aria-hidden />}
+              {t.name}
+            </button>
+            {deletable && (
+              <button
+                type="button"
+                onClick={() => remove(t)}
+                disabled={busy}
+                aria-label={`Delete ${t.name} thread`}
+                title={`Delete the ${t.name} thread (keeps its experiments on disk)`}
+                className="mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full opacity-50 transition hover:bg-red-400/20 hover:text-red-200 hover:opacity-100 focus:outline-none disabled:opacity-30"
+              >
+                <X className="h-3 w-3" aria-hidden />
+              </button>
+            )}
+          </span>
         );
       })}
 
