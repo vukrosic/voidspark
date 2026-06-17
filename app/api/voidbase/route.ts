@@ -17,6 +17,7 @@ export const dynamic = 'force-dynamic';
 const VOIDBASE_API = process.env.VOIDBASE_API_URL || 'http://127.0.0.1:8787';
 const ALLOWED = new Set([
   'health', 'runs', 'threads', 'comparisons', 'champions', 'ideas', 'queue',
+  'eval',
 ]);
 
 export async function POST(req: Request) {
@@ -26,9 +27,11 @@ export async function POST(req: Request) {
   void hasActiveRepo;
 
   let resource = 'health';
+  let id = '';
   try {
     const body = await req.json();
     if (body && typeof body.resource === 'string') resource = body.resource;
+    if (body && typeof body.id === 'string') id = body.id;
   } catch {
     // empty/invalid body -> default to /health
   }
@@ -40,8 +43,12 @@ export async function POST(req: Request) {
     );
   }
 
+  // /eval is keyed by run id; everything else is a plain collection.
+  const path =
+    resource === 'eval' ? `eval?run_id=${encodeURIComponent(id)}` : resource;
+
   try {
-    const r = await fetch(`${VOIDBASE_API}/${resource}`, { cache: 'no-store' });
+    const r = await fetch(`${VOIDBASE_API}/${path}`, { cache: 'no-store' });
     const data = await r.json();
     return Response.json({ success: true, resource, upstream: VOIDBASE_API, data }, { status: 200 });
   } catch (e) {

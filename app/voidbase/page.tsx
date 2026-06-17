@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 
 // ---- voidbase view ----------------------------------------------------------
@@ -28,6 +28,12 @@ type Run = {
   final_val_loss: number | null;
   git_branch: string | null;
   created_at: string | null;
+  has_eval?: boolean;
+};
+
+type EvalPoint = {
+  step: number;
+  val_loss: number | null;
 };
 
 type Comparison = {
@@ -41,11 +47,11 @@ type Comparison = {
 
 type Envelope<T> = { success: boolean; data?: T; error?: string; upstream?: string };
 
-async function fetchResource<T>(resource: string): Promise<Envelope<T>> {
+async function fetchResource<T>(resource: string, id?: string): Promise<Envelope<T>> {
   const r = await fetch('/api/voidbase/', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resource }),
+    body: JSON.stringify(id ? { resource, id } : { resource }),
   });
   return r.json();
 }
@@ -56,6 +62,42 @@ function fmt(n: number | null, digits = 4): string {
 
 function shortId(id: string): string {
   return id.length > 10 ? id.slice(0, 8) : id;
+}
+
+// Inline val-loss curve (step -> val_loss), no chart lib. Plots the registry's
+// eval_points so a run's learning curve is visible right in the row.
+function EvalCurve({ points }: { points: EvalPoint[] }) {
+  const pts = points.filter((p) => p.val_loss != null) as { step: number; val_loss: number }[];
+  if (pts.length < 2) {
+    return <span className="text-xs text-[#faf9f6]/40">not enough eval points to plot</span>;
+  }
+  const W = 520;
+  const H = 120;
+  const pad = 6;
+  const steps = pts.map((p) => p.step);
+  const vals = pts.map((p) => p.val_loss);
+  const xMin = Math.min(...steps);
+  const xMax = Math.max(...steps);
+  const yMin = Math.min(...vals);
+  const yMax = Math.max(...vals);
+  const x = (s: number) => pad + ((s - xMin) / (xMax - xMin || 1)) * (W - 2 * pad);
+  const y = (v: number) => pad + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - 2 * pad);
+  const d = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(p.step).toFixed(1)} ${y(p.val_loss).toFixed(1)}`).join(' ');
+  return (
+    <div className="flex items-center gap-4">
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full max-w-xl" preserveAspectRatio="none">
+        <path d={d} fill="none" stroke="rgb(110 231 183)" strokeWidth={1.5} />
+        {pts.map((p) => (
+          <circle key={p.step} cx={x(p.step)} cy={y(p.val_loss)} r={1.6} fill="rgb(110 231 183)" />
+        ))}
+      </svg>
+      <div className="shrink-0 text-xs text-[#faf9f6]/50">
+        <div>{pts.length} pts</div>
+        <div>val {fmt(yMax, 2)} → {fmt(yMin, 2)}</div>
+        <div>step {xMin}–{xMax}</div>
+      </div>
+    </div>
+  );
 }
 
 const VERIF_CLS: Record<string, string> = {
@@ -70,6 +112,23 @@ export default function VoidbasePage() {
   const [comparisons, setComparisons] = useState<Comparison[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [evalCache, setEvalCache] = useState<Record<string, EvalPoint[]>>({});
+
+  const toggleCurve = useCallback(
+    async (runId: string) => {
+      if (expanded === runId) {
+        setExpanded(null);
+        return;
+      }
+      setExpanded(runId);
+      if (!evalCache[runId]) {
+        const res = await fetchResource<EvalPoint[]>('eval', runId);
+        setEvalCache((prev) => ({ ...prev, [runId]: res.data ?? [] }));
+      }
+    },
+    [expanded, evalCache],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -160,22 +219,47 @@ cd voidbase &amp;&amp; python3 api/server.py</pre>
                 </thead>
                 <tbody>
                   {runs.map((r) => (
-                    <tr key={r.id} className="border-t border-white/5">
-                      <td className="px-3 py-2 font-mono text-xs text-[#faf9f6]/80">{r.name ?? shortId(r.id)}</td>
-                      <td className="px-3 py-2 text-[#faf9f6]/60">{r.thread_name ?? '—'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.seed ?? '—'}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{fmt(r.final_val_loss)}</td>
-                      <td className="px-3 py-2 text-[#faf9f6]/60">{r.status ?? '—'}</td>
-                      <td className="px-3 py-2">
-                        <span
-                          className={`rounded border px-1.5 py-0.5 text-[11px] ${
-                            VERIF_CLS[r.verification ?? ''] ?? 'border-white/15 text-[#faf9f6]/60'
-                          }`}
-                        >
-                          {r.verification ?? '—'}
-                        </span>
-                      </td>
-                    </tr>
+                    <Fragment key={r.id}>
+                      <tr
+                        className={`border-t border-white/5 ${
+                          r.has_eval ? 'cursor-pointer hover:bg-white/5' : ''
+                        } ${expanded === r.id ? 'bg-white/5' : ''}`}
+                        onClick={r.has_eval ? () => void toggleCurve(r.id) : undefined}
+                      >
+                        <td className="px-3 py-2 font-mono text-xs text-[#faf9f6]/80">
+                          {r.has_eval && (
+                            <span className="mr-1 inline-block text-[#faf9f6]/40">
+                              {expanded === r.id ? '▾' : '▸'}
+                            </span>
+                          )}
+                          {r.name ?? shortId(r.id)}
+                        </td>
+                        <td className="px-3 py-2 text-[#faf9f6]/60">{r.thread_name ?? '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{r.seed ?? '—'}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{fmt(r.final_val_loss)}</td>
+                        <td className="px-3 py-2 text-[#faf9f6]/60">{r.status ?? '—'}</td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`rounded border px-1.5 py-0.5 text-[11px] ${
+                              VERIF_CLS[r.verification ?? ''] ?? 'border-white/15 text-[#faf9f6]/60'
+                            }`}
+                          >
+                            {r.verification ?? '—'}
+                          </span>
+                        </td>
+                      </tr>
+                      {expanded === r.id && (
+                        <tr className="border-t border-white/5 bg-black/20">
+                          <td colSpan={6} className="px-4 py-4">
+                            {evalCache[r.id] ? (
+                              <EvalCurve points={evalCache[r.id]} />
+                            ) : (
+                              <span className="text-xs text-[#faf9f6]/40">loading curve…</span>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
