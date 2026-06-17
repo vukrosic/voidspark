@@ -121,6 +121,7 @@ export default function ContributePage() {
             voidbase
           </div>
           <div className="flex items-center gap-4 text-[#faf9f6]/55">
+            <Link href="/gallery" className="hover:text-[#faf9f6]">Champion lineage</Link>
             <Link href="/voidbase" className="hover:text-[#faf9f6]">Browse the record</Link>
             <Link href="/leaderboard" className="hover:text-[#faf9f6]">Leaderboard</Link>
             <Link href="/" className="hover:text-[#faf9f6]">Cockpit</Link>
@@ -169,6 +170,24 @@ export default function ContributePage() {
           <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-emerald-200">
             Start <ArrowRight className="h-4 w-4" />
           </span>
+        </Link>
+
+        {/* ideas that became champion — recruiting signal, surfaced first */}
+        <Link
+          href="/gallery"
+          className="mt-10 flex items-center justify-between gap-4 rounded-2xl border border-emerald-400/30 bg-emerald-400/[0.06] px-5 py-4 transition hover:border-emerald-400/60 hover:bg-emerald-400/10"
+        >
+          <div className="flex items-center gap-3">
+            <Trophy className="h-5 w-5 shrink-0 text-emerald-300" />
+            <div>
+              <div className="text-sm font-semibold text-[#faf9f6]">Here are ideas that became champion</div>
+              <div className="text-[13px] text-[#faf9f6]/55">
+                Real contributors&apos; mechanisms that moved the record — see the champion lineage,
+                with each inventor credited.
+              </div>
+            </div>
+          </div>
+          <ArrowRight className="h-4 w-4 shrink-0 text-emerald-300" />
         </Link>
 
         {/* three paths */}

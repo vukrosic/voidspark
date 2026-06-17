@@ -282,15 +282,28 @@ export default function LeaderboardPage() {
               Every idea the reviewer has called WIN / NULL / FAIL or DRIFT, sorted by delta against
               its matched control. Click <span className="text-amber-200/80">Evidence</span> to
               open the full write-up, or <span className="text-amber-200/80">Curve</span> to overlay
-              the val-loss trace against the control run.
+              the val-loss trace against the control run. For just the promotions that moved the
+              record — with the inventor credited — see the{' '}
+              <Link href="/gallery" className="text-emerald-200/90 hover:underline">
+                champion lineage
+              </Link>
+              .
             </p>
           </div>
-          <Link
-            href="/"
-            className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-[0.18em] text-[#faf9f6]/55 transition hover:border-white/30 hover:text-[#faf9f6]"
-          >
-            ← Dashboard
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/gallery"
+              className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.18em] text-emerald-200 transition hover:border-emerald-400/60 hover:text-emerald-100"
+            >
+              🏆 Champion lineage
+            </Link>
+            <Link
+              href="/"
+              className="rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-[0.18em] text-[#faf9f6]/55 transition hover:border-white/30 hover:text-[#faf9f6]"
+            >
+              ← Dashboard
+            </Link>
+          </div>
         </div>
       </header>
 
