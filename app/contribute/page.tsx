@@ -30,6 +30,37 @@ async function fetchResource<T>(resource: string): Promise<Envelope<T>> {
 type Health = { ok: boolean; counts?: Record<string, number> };
 type Champion = { scope: string; val_loss: number | null; run_id: string | null };
 
+// The live activity feed (voidbase /activity, Postgres-only). recent_runs is
+// what lands here — runs that hit the registry in the last 30 min, each tagged
+// with the contributor handle (null → "anonymous" until #14's attribution
+// flows through). in_flight is what a donor box is training right now.
+type RecentRun = {
+  id: string;
+  name: string | null;
+  status: string | null;
+  final_val_loss: number | null;
+  verification: string | null;
+  age_s: number | null;
+  handle: string | null;
+};
+type InFlight = { id: string; name: string | null; age_s: number | null; handle: string | null };
+type Activity = { recent_runs?: RecentRun[]; in_flight?: InFlight[] };
+
+// Relative age, matching the /voidbase view's `ago()` (seconds → s/m/h).
+function ago(s: number | null): string {
+  if (s == null) return '—';
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
+}
+
+// Verification → colour, so a reproduced result reads green at a glance.
+const VERIF_CLS: Record<string, string> = {
+  confirmed: 'border-emerald-400/40 text-emerald-300',
+  rejected: 'border-rose-400/40 text-rose-300',
+  unverified: 'border-amber-300/30 text-amber-200/80',
+};
+
 function Stat({ value, label }: { value: string; label: string }) {
   return (
     <div className="text-center">
@@ -97,6 +128,10 @@ export default function ContributePage() {
   const router = useRouter();
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
   const [champion, setChampion] = useState<Champion | null>(null);
+  const [activity, setActivity] = useState<Activity | null>(null);
+  // null until the first poll resolves → lets us show a "waiting for the loop"
+  // line instead of flashing an empty feed on load.
+  const [activityLoaded, setActivityLoaded] = useState(false);
 
   const load = useCallback(async () => {
     const [h, c] = await Promise.all([
@@ -108,6 +143,26 @@ export default function ContributePage() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Live activity ticker: poll the recent-runs snapshot every 20s so a visitor
+  // sees the loop actually moving — the strongest "this lab is alive" signal on
+  // the front door. Pauses while the tab is hidden (no point hammering the proxy
+  // for a page nobody's watching).
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    const tick = async () => {
+      if (document.hidden) return;
+      const a = await fetchResource<Activity>('activity');
+      if (a.success && a.data) setActivity(a.data);
+      setActivityLoaded(true);
+    };
+    const start = () => { if (!interval) { void tick(); interval = setInterval(tick, 20000); } };
+    const stop = () => { if (interval) clearInterval(interval); interval = null; };
+    const onVis = () => (document.hidden ? stop() : start());
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { stop(); document.removeEventListener('visibilitychange', onVis); };
+  }, []);
 
   const champVal = champion?.val_loss != null ? champion.val_loss.toFixed(4) : '6.1720';
 
@@ -154,6 +209,67 @@ export default function ContributePage() {
             </div>
           ))}
         </div>
+
+        {/* live activity ticker — proof the loop is moving right now */}
+        {(() => {
+          const inFlight = activity?.in_flight ?? [];
+          const recent = activity?.recent_runs ?? [];
+          const hasFeed = inFlight.length > 0 || recent.length > 0;
+          return (
+            <div className="mt-8 overflow-hidden rounded-xl border border-white/10 bg-white/[0.03]">
+              <div className="flex items-center justify-between border-b border-white/10 px-4 py-2.5">
+                <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-[#faf9f6]/55">
+                  <span className="relative flex h-2 w-2">
+                    {hasFeed && (
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400/70" />
+                    )}
+                    <span className={`relative inline-flex h-2 w-2 rounded-full ${hasFeed ? 'bg-emerald-400' : 'bg-[#faf9f6]/25'}`} />
+                  </span>
+                  Live activity
+                </span>
+                <span className="text-[10px] text-[#faf9f6]/35">updates every 20s</span>
+              </div>
+              <div className="divide-y divide-white/5">
+                {inFlight.slice(0, 3).map((j) => (
+                  <div key={`f-${j.id}`} className="flex items-center justify-between px-4 py-2 text-[13px]">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="shrink-0 rounded border border-sky-400/40 px-1.5 py-0.5 text-[10px] text-sky-300">training</span>
+                      <span className="truncate font-mono text-[#faf9f6]/80">{j.name ?? j.id.slice(0, 8)}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3 text-[#faf9f6]/45">
+                      <span>{j.handle ?? 'anonymous'}</span>
+                      <span className="tabular-nums text-[#faf9f6]/35">{ago(j.age_s)}</span>
+                    </span>
+                  </div>
+                ))}
+                {recent.slice(0, 6).map((r) => (
+                  <div key={`r-${r.id}`} className="flex items-center justify-between px-4 py-2 text-[13px]">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate font-mono text-[#faf9f6]/80">{r.name ?? r.id.slice(0, 8)}</span>
+                      {r.final_val_loss != null && (
+                        <span className="shrink-0 tabular-nums text-[#faf9f6]/55">{r.final_val_loss.toFixed(4)}</span>
+                      )}
+                      <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] ${VERIF_CLS[r.verification ?? ''] ?? 'border-white/15 text-[#faf9f6]/45'}`}>
+                        {r.verification ?? '—'}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3 text-[#faf9f6]/45">
+                      <span>{r.handle ?? 'anonymous'}</span>
+                      <span className="tabular-nums text-[#faf9f6]/35">{ago(r.age_s)} ago</span>
+                    </span>
+                  </div>
+                ))}
+                {!hasFeed && (
+                  <div className="px-4 py-3 text-[13px] text-[#faf9f6]/40">
+                    {activityLoaded
+                      ? 'The loop is quiet right now — runs will stream in here as boxes train and report.'
+                      : 'Loading the live feed…'}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* new-contributor onramp — the research path expanded into 6 guided steps */}
         <Link
