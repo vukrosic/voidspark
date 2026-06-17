@@ -138,8 +138,13 @@ export default function VoidbasePage() {
       fetchResource<Comparison[]>('comparisons'),
     ]);
     if (!h.success) {
+      // API unreachable: show ONLY the banner — don't leave stale tables/counts
+      // hanging around, which reads as "still working".
       setError(h.error ?? 'voidbase API unreachable');
       setHealth(null);
+      setRuns([]);
+      setComparisons([]);
+      setExpanded(null);
     } else {
       setError(null);
       setHealth(h.data ?? null);
