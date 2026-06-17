@@ -150,18 +150,22 @@ export default function ContributePage() {
   // for a page nobody's watching).
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | null = null;
-    const tick = async () => {
-      if (document.hidden) return;
+    const poll = async () => {
       const a = await fetchResource<Activity>('activity');
       if (a.success && a.data) setActivity(a.data);
       setActivityLoaded(true);
     };
-    const start = () => { if (!interval) { void tick(); interval = setInterval(tick, 20000); } };
-    const stop = () => { if (interval) clearInterval(interval); interval = null; };
-    const onVis = () => (document.hidden ? stop() : start());
-    if (!document.hidden) start();
+    // Always fetch once on mount — even in a background tab — so the feed is
+    // populated the moment the visitor looks at it. Only the recurring 20s poll
+    // pauses while hidden (and refetches on the way back to visible).
+    void poll();
+    interval = setInterval(() => { if (!document.hidden) void poll(); }, 20000);
+    const onVis = () => { if (!document.hidden) void poll(); };
     document.addEventListener('visibilitychange', onVis);
-    return () => { stop(); document.removeEventListener('visibilitychange', onVis); };
+    return () => {
+      if (interval) clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   }, []);
 
   const champVal = champion?.val_loss != null ? champion.val_loss.toFixed(4) : '6.1720';
