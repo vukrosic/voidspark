@@ -28,6 +28,7 @@ type Thread = {
   claim_expires_at: string | null;
   // "is this hot" signal — runs landed under this thread in the last 7 days.
   run_count_last_7d: number | null;
+  tags?: string[];
 };
 
 type Envelope<T> = { success: boolean; data?: T; error?: string };
@@ -90,7 +91,20 @@ const BLANK = {
   priority: 1,
   hypothesis: '',
   goal_prompt: '',
+  tags: '',
 };
+
+// "attention, positional decay" → ["attention", "positional decay"]
+function parseTags(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+  );
+}
 
 export default function ResearchBoard() {
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -100,6 +114,7 @@ export default function ResearchBoard() {
   const [msg, setMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
+  const [activeTags, setActiveTags] = useState<string[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -118,10 +133,12 @@ export default function ResearchBoard() {
     }
     setSaving(true);
     setMsg(null);
+    const { tags: rawTags, ...rest } = form;
     const res = await saveThread({
-      ...form,
+      ...rest,
       name: form.name.trim(),
       priority: Number(form.priority) || 0,
+      tags: parseTags(rawTags),
     });
     setSaving(false);
     if (res.success) {
@@ -162,7 +179,21 @@ export default function ResearchBoard() {
     void load();
   };
 
-  const sorted = [...threads].sort((a, b) => {
+  const toggleTag = (tag: string) =>
+    setActiveTags((cur) => (cur.includes(tag) ? cur.filter((t) => t !== tag) : [...cur, tag]));
+
+  // every distinct tag across all threads (for the filter bar)
+  const allTags = Array.from(new Set(threads.flatMap((t) => t.tags ?? []))).sort((a, b) =>
+    a.localeCompare(b),
+  );
+
+  // a thread matches the filter if it carries every active tag (AND semantics)
+  const filtered =
+    activeTags.length === 0
+      ? threads
+      : threads.filter((t) => activeTags.every((tag) => (t.tags ?? []).includes(tag)));
+
+  const sorted = [...filtered].sort((a, b) => {
     const s = (STATUS_ORDER[a.status ?? ''] ?? 9) - (STATUS_ORDER[b.status ?? ''] ?? 9);
     if (s !== 0) return s;
     return (b.priority ?? 0) - (a.priority ?? 0);
@@ -263,6 +294,15 @@ export default function ResearchBoard() {
               />
             </label>
             <label className="mt-3 block text-xs text-[#faf9f6]/60">
+              tags (comma-separated)
+              <input
+                className={field}
+                value={form.tags}
+                onChange={(e) => setForm({ ...form, tags: e.target.value })}
+                placeholder="attention, positional, champion-323"
+              />
+            </label>
+            <label className="mt-3 block text-xs text-[#faf9f6]/60">
               goal prompt (the full brief an AI executes end-to-end)
               <textarea
                 className={`${field} h-40 font-mono text-xs leading-relaxed`}
@@ -285,9 +325,43 @@ export default function ResearchBoard() {
           </div>
         )}
 
+        {allTags.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wide text-[#faf9f6]/40">filter</span>
+            {allTags.map((tag) => {
+              const on = activeTags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  onClick={() => toggleTag(tag)}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] transition ${
+                    on
+                      ? 'border-violet-400/50 bg-violet-400/20 text-violet-100'
+                      : 'border-white/15 bg-white/5 text-[#faf9f6]/60 hover:bg-white/10'
+                  }`}
+                >
+                  #{tag}
+                </button>
+              );
+            })}
+            {activeTags.length > 0 && (
+              <button
+                onClick={() => setActiveTags([])}
+                className="rounded-full border border-white/10 px-2.5 py-0.5 text-[11px] text-[#faf9f6]/40 hover:text-[#faf9f6]/70"
+              >
+                clear
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="space-y-3">
           {sorted.length === 0 && !loading && (
-            <p className="text-sm text-[#faf9f6]/40">No threads yet — author one above.</p>
+            <p className="text-sm text-[#faf9f6]/40">
+              {activeTags.length > 0
+                ? 'No threads match the selected tags.'
+                : 'No threads yet — author one above.'}
+            </p>
           )}
           {sorted.map((t) => (
             <div
@@ -307,6 +381,23 @@ export default function ResearchBoard() {
                   </div>
                   {t.hypothesis && (
                     <p className="mt-1 text-sm text-[#faf9f6]/70">{t.hypothesis}</p>
+                  )}
+                  {(t.tags ?? []).length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(t.tags ?? []).map((tag) => (
+                        <button
+                          key={tag}
+                          onClick={() => toggleTag(tag)}
+                          className={`rounded-full border px-2 py-0.5 text-[10px] transition ${
+                            activeTags.includes(tag)
+                              ? 'border-violet-400/50 bg-violet-400/20 text-violet-100'
+                              : 'border-violet-400/20 bg-violet-400/5 text-violet-200/70 hover:bg-violet-400/10'
+                          }`}
+                        >
+                          #{tag}
+                        </button>
+                      ))}
+                    </div>
                   )}
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
