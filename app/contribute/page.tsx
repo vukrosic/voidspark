@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   Cpu, GitPullRequest, FlaskConical, ArrowRight, ShieldCheck, GitMerge,
-  CircleDot, Trophy, Server, Coins, ListChecks,
+  CircleDot, Trophy, Server, Coins, ListChecks, Compass,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 
@@ -97,7 +97,6 @@ export default function ContributePage() {
   const router = useRouter();
   const [counts, setCounts] = useState<Record<string, number> | null>(null);
   const [champion, setChampion] = useState<Champion | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [h, c] = await Promise.all([
@@ -155,6 +154,23 @@ export default function ContributePage() {
           ))}
         </div>
 
+        {/* new-contributor onramp — the research path expanded into 6 guided steps */}
+        <Link
+          href="/onboarding"
+          className="mt-8 flex items-center justify-between gap-3 rounded-xl border border-emerald-400/30 bg-emerald-400/[0.07] px-4 py-3 transition hover:border-emerald-400/50 hover:bg-emerald-400/10"
+        >
+          <span className="flex items-center gap-2.5 text-sm text-[#faf9f6]/85">
+            <Compass className="h-4 w-4 text-emerald-300" />
+            New here? Follow the guided onboarding — clone, read the champion, pick a thread, open your first PR.
+            <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-2 py-0.5 text-[11px] font-medium text-cyan-200">
+              ~2 hours
+            </span>
+          </span>
+          <span className="inline-flex shrink-0 items-center gap-1 text-sm font-medium text-emerald-200">
+            Start <ArrowRight className="h-4 w-4" />
+          </span>
+        </Link>
+
         {/* three paths */}
         <h2 className="mb-4 mt-12 text-sm font-semibold uppercase tracking-wide text-[#faf9f6]/50">
           Three ways to contribute
@@ -199,16 +215,10 @@ export default function ContributePage() {
               'It becomes a brief others can code',
               'Reproduced → it can become champion',
             ]}
-            cta="Submit an idea"
-            onCta={() => setNote('Idea submission writes to ideas(status=proposed); curation UI + endpoint next. Design preview.')}
+            cta="Start onboarding"
+            onCta={() => router.push('/onboarding')}
           />
         </div>
-
-        {note && (
-          <div className="mt-4 rounded-lg border border-amber-300/25 bg-amber-300/5 px-4 py-3 text-[13px] text-amber-100/80">
-            {note}
-          </div>
-        )}
 
         {/* integrity pipeline */}
         <h2 className="mb-1 mt-14 flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-[#faf9f6]/50">

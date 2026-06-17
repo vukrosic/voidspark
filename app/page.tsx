@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
@@ -1839,6 +1840,17 @@ export default function LaunchCodexPage() {
               </button>
             );
           })}
+          {/* Guided onboarding — the "start here" for new research contributors. */}
+          <Link
+            href="/onboarding"
+            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-emerald-300/80 transition hover:bg-emerald-400/[0.08] hover:text-emerald-200"
+          >
+            <span aria-hidden className="text-[11px] opacity-70">◆</span>
+            <span className="font-medium">Onboarding</span>
+            <span className="ml-auto rounded-full border border-emerald-400/25 bg-emerald-400/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-200/80">
+              new
+            </span>
+          </Link>
         </nav>
 
         <div className="mt-6 px-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-[#faf9f6]/40">
