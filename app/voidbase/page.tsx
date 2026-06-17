@@ -351,8 +351,14 @@ cd voidbase &amp;&amp; python3 api/server.py</pre>
                 {(activity?.contributors ?? []).length > 0 ? (
                   <ul className="space-y-1 text-xs">
                     {activity!.contributors!.map((c) => (
-                      <li key={c.handle} className="flex justify-between rounded bg-white/5 px-2 py-1">
-                        <span className="text-[#faf9f6]/75">{c.handle} <span className="text-[#faf9f6]/35">{c.role}</span></span>
+                      <li key={c.handle} className="flex justify-between rounded bg-white/5 px-2 py-1 hover:bg-white/10">
+                        <Link
+                          href={`/contributor?handle=${encodeURIComponent(c.handle)}`}
+                          className="text-[#faf9f6]/75 hover:text-emerald-200 hover:underline"
+                          title={`Open ${c.handle}'s dashboard`}
+                        >
+                          {c.handle} <span className="text-[#faf9f6]/35">{c.role}</span>
+                        </Link>
                         <span className="tabular-nums text-[#faf9f6]/50">{c.runs_total} runs{c.runs_recent ? ` · ${c.runs_recent} recent` : ''}</span>
                       </li>
                     ))}
