@@ -22,6 +22,12 @@ type Thread = {
   priority: number | null;
   repo_url: string | null;
   updated_at: string | null;
+  // claim / status — expired claims read back null (server auto-releases lazily).
+  claimed_by: string | null;
+  claimed_at: string | null;
+  claim_expires_at: string | null;
+  // "is this hot" signal — runs landed under this thread in the last 7 days.
+  run_count_last_7d: number | null;
 };
 
 type Envelope<T> = { success: boolean; data?: T; error?: string };
@@ -43,6 +49,36 @@ async function saveThread(t: Partial<Thread>): Promise<Envelope<Thread>> {
     body: JSON.stringify({ resource: 'threads', write: t }),
   });
   return r.json();
+}
+
+// Claim / release ride the same write path (write:{...} -> upstream POST
+// /threads); the upstream switches on `action`. The proxy returns the raw
+// upstream JSON in `data`, which carries an `error` string on a rejected claim.
+async function claimThread(name: string, handle: string): Promise<Envelope<Thread & { error?: string }>> {
+  const r = await fetch('/api/voidbase/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resource: 'threads', write: { action: 'claim', name, claimed_by: handle } }),
+  });
+  return r.json();
+}
+
+async function releaseThread(name: string): Promise<Envelope<Thread & { error?: string }>> {
+  const r = await fetch('/api/voidbase/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resource: 'threads', write: { action: 'release', name } }),
+  });
+  return r.json();
+}
+
+// "42h left" — time remaining on a claim before it lazily auto-releases.
+function claimTimeLeft(expiresAt: string | null): string {
+  if (!expiresAt) return '';
+  const ms = new Date(expiresAt).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return '';
+  const h = Math.round(ms / 3_600_000);
+  return h > 0 ? `${h}h left` : 'expiring';
 }
 
 const STATUS_ORDER: Record<string, number> = { active: 0, paused: 1, closed: 2 };
@@ -106,6 +142,24 @@ export default function ResearchBoard() {
     } catch {
       /* clipboard blocked — ignore */
     }
+  };
+
+  const claim = async (name: string) => {
+    const handle = window.prompt(`Claim "${name}" as (your handle):`)?.trim();
+    if (!handle) return;
+    setMsg(null);
+    const res = await claimThread(name, handle);
+    const err = res.error || res.data?.error;
+    setMsg(err ? `claim failed: ${err}` : `claimed "${name}" as ${handle}`);
+    void load();
+  };
+
+  const release = async (name: string) => {
+    setMsg(null);
+    const res = await releaseThread(name);
+    const err = res.error || res.data?.error;
+    setMsg(err ? `release failed: ${err}` : `released "${name}"`);
+    void load();
   };
 
   const sorted = [...threads].sort((a, b) => {
@@ -269,6 +323,35 @@ export default function ResearchBoard() {
                   </span>
                   <span className="text-[11px] text-[#faf9f6]/40">p{t.priority ?? 0}</span>
                 </div>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {(t.run_count_last_7d ?? 0) > 0 && (
+                  <span className="rounded border border-orange-400/20 bg-orange-400/5 px-1.5 py-0.5 text-[11px] text-orange-200/80">
+                    🔥 {t.run_count_last_7d} run{t.run_count_last_7d === 1 ? '' : 's'} this week
+                  </span>
+                )}
+                {t.claimed_by ? (
+                  <>
+                    <span className="rounded border border-violet-400/25 bg-violet-400/10 px-2 py-0.5 text-[11px] text-violet-200">
+                      👤 claimed by {t.claimed_by}
+                      {claimTimeLeft(t.claim_expires_at) &&
+                        ` · ${claimTimeLeft(t.claim_expires_at)}`}
+                    </span>
+                    <button
+                      onClick={() => void release(t.name)}
+                      className="rounded border border-white/15 px-2 py-0.5 text-[11px] text-[#faf9f6]/70 hover:bg-white/10"
+                    >
+                      Release
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => void claim(t.name)}
+                    className="rounded border border-violet-400/30 bg-violet-400/10 px-2 py-0.5 text-[11px] text-violet-200 hover:bg-violet-400/20"
+                  >
+                    Claim this
+                  </button>
+                )}
               </div>
               {t.goal_prompt && (
                 <div className="mt-3">
