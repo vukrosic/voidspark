@@ -45,6 +45,33 @@ type Comparison = {
   is_paired: boolean;
 };
 
+type InFlight = {
+  id: string;
+  name: string | null;
+  status: string | null;
+  age_s: number | null;
+  box: string | null;
+  handle: string | null;
+};
+type RecentRun = {
+  id: string;
+  name: string | null;
+  status: string | null;
+  final_val_loss: number | null;
+  verification: string | null;
+  age_s: number | null;
+  handle: string | null;
+  box: string | null;
+};
+type Activity = {
+  backend?: string;
+  queue?: Record<string, number>;
+  in_flight?: InFlight[];
+  active_boxes?: { label: string | null; handle: string | null; in_flight: number }[];
+  recent_runs?: RecentRun[];
+  contributors?: { handle: string; role: string; runs_total: number; runs_recent: number }[];
+};
+
 type Envelope<T> = { success: boolean; data?: T; error?: string; upstream?: string };
 
 async function fetchResource<T>(resource: string, id?: string): Promise<Envelope<T>> {
@@ -62,6 +89,13 @@ function fmt(n: number | null, digits = 4): string {
 
 function shortId(id: string): string {
   return id.length > 10 ? id.slice(0, 8) : id;
+}
+
+function ago(s: number | null): string {
+  if (s == null) return '—';
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h`;
 }
 
 // Inline val-loss curve (step -> val_loss), no chart lib. Plots the registry's
@@ -114,6 +148,8 @@ export default function VoidbasePage() {
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [evalCache, setEvalCache] = useState<Record<string, EvalPoint[]>>({});
+  const [activity, setActivity] = useState<Activity | null>(null);
+  const [live, setLive] = useState(true);
 
   const toggleCurve = useCallback(
     async (runId: string) => {
@@ -157,6 +193,30 @@ export default function VoidbasePage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Live activity: poll the in-flight snapshot every 3s so the operator can
+  // watch concurrent work stream in. Also re-pulls runs so finished work
+  // appears without a manual refresh. Toggle off to stop polling.
+  useEffect(() => {
+    if (!live) return;
+    let alive = true;
+    const tick = async () => {
+      const a = await fetchResource<Activity>('activity');
+      if (alive && a.success) setActivity(a.data ?? null);
+    };
+    void tick();
+    const iv = setInterval(() => {
+      void tick();
+      void load();
+    }, 3000);
+    return () => {
+      alive = false;
+      clearInterval(iv);
+    };
+  }, [live, load]);
+
+  const inFlight = activity?.in_flight ?? [];
+  const q = activity?.queue ?? {};
 
   return (
     <div className="min-h-screen bg-[#0b0b0d] px-6 py-8 text-[#faf9f6]">
@@ -203,6 +263,129 @@ cd voidbase &amp;&amp; python3 api/server.py</pre>
               backend: {health.backend} · {health.db}
             </div>
           </div>
+        )}
+
+        {health?.ok && (
+          <section className="mb-8 rounded-lg border border-white/10 bg-white/[0.03] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-[#faf9f6]/70">
+                <span className={`inline-block h-2 w-2 rounded-full ${live ? 'animate-pulse bg-emerald-400' : 'bg-white/30'}`} />
+                Live activity
+              </h2>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-[#faf9f6]/50">
+                  {(q['running'] ?? 0) + (q['claimed'] ?? 0)} in flight · {q['needs-run'] ?? 0} queued
+                </span>
+                <button
+                  onClick={() => setLive((v) => !v)}
+                  className="rounded border border-white/15 bg-white/5 px-2 py-1 hover:bg-white/10"
+                >
+                  {live ? 'Pause' : 'Go live'}
+                </button>
+              </div>
+            </div>
+
+            {/* status chips */}
+            <div className="mb-4 flex flex-wrap gap-2 text-[11px]">
+              {(['needs-run', 'claimed', 'running', 'done', 'failed'] as const).map((s) => (
+                <span key={s} className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                  <span className="font-semibold tabular-nums">{q[s] ?? 0}</span>
+                  <span className="ml-1 text-[#faf9f6]/45">{s}</span>
+                </span>
+              ))}
+            </div>
+
+            {inFlight.length > 0 ? (
+              <div className="mb-4 overflow-hidden rounded-md border border-white/10">
+                <table className="w-full text-xs">
+                  <thead className="bg-white/5 text-[10px] uppercase tracking-wide text-[#faf9f6]/45">
+                    <tr>
+                      <th className="px-3 py-1.5 text-left">working on</th>
+                      <th className="px-3 py-1.5 text-left">status</th>
+                      <th className="px-3 py-1.5 text-left">box</th>
+                      <th className="px-3 py-1.5 text-left">who</th>
+                      <th className="px-3 py-1.5 text-right">for</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {inFlight.map((j) => (
+                      <tr key={j.id} className="border-t border-white/5">
+                        <td className="px-3 py-1.5 font-mono text-[#faf9f6]/80">{j.name ?? shortId(j.id)}</td>
+                        <td className="px-3 py-1.5">
+                          <span className={`rounded px-1.5 py-0.5 ${j.status === 'running' ? 'bg-emerald-400/15 text-emerald-200' : 'bg-amber-300/10 text-amber-200/90'}`}>
+                            {j.status}
+                          </span>
+                        </td>
+                        <td className="px-3 py-1.5 text-[#faf9f6]/60">{j.box ?? '—'}</td>
+                        <td className="px-3 py-1.5 text-[#faf9f6]/60">{j.handle ?? '—'}</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums text-[#faf9f6]/50">{ago(j.age_s)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="mb-4 rounded-md border border-dashed border-white/10 px-3 py-3 text-center text-xs text-[#faf9f6]/40">
+                nothing in flight right now
+              </div>
+            )}
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <div className="mb-1.5 text-[10px] uppercase tracking-wide text-[#faf9f6]/45">Active boxes</div>
+                {(activity?.active_boxes ?? []).length > 0 ? (
+                  <ul className="space-y-1 text-xs">
+                    {activity!.active_boxes!.map((b, i) => (
+                      <li key={i} className="flex justify-between rounded bg-white/5 px-2 py-1">
+                        <span className="text-[#faf9f6]/75">{b.label ?? '—'}{b.handle ? ` · ${b.handle}` : ''}</span>
+                        <span className="tabular-nums text-emerald-200/80">{b.in_flight} running</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-[#faf9f6]/35">no boxes busy</div>
+                )}
+              </div>
+              <div>
+                <div className="mb-1.5 text-[10px] uppercase tracking-wide text-[#faf9f6]/45">Contributors</div>
+                {(activity?.contributors ?? []).length > 0 ? (
+                  <ul className="space-y-1 text-xs">
+                    {activity!.contributors!.map((c) => (
+                      <li key={c.handle} className="flex justify-between rounded bg-white/5 px-2 py-1">
+                        <span className="text-[#faf9f6]/75">{c.handle} <span className="text-[#faf9f6]/35">{c.role}</span></span>
+                        <span className="tabular-nums text-[#faf9f6]/50">{c.runs_total} runs{c.runs_recent ? ` · ${c.runs_recent} recent` : ''}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-xs text-[#faf9f6]/35">no contributors yet</div>
+                )}
+              </div>
+            </div>
+
+            {(activity?.recent_runs ?? []).length > 0 && (
+              <div className="mt-4">
+                <div className="mb-1.5 text-[10px] uppercase tracking-wide text-[#faf9f6]/45">
+                  Landed in the last 30 min
+                </div>
+                <ul className="space-y-1 text-xs">
+                  {activity!.recent_runs!.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between rounded bg-white/5 px-2 py-1">
+                      <span className="font-mono text-[#faf9f6]/75">{r.name ?? shortId(r.id)}</span>
+                      <span className="flex items-center gap-3">
+                        <span className="text-[#faf9f6]/45">{r.handle ?? '—'}</span>
+                        <span className="tabular-nums text-[#faf9f6]/70">{fmt(r.final_val_loss)}</span>
+                        <span className={`rounded border px-1 py-0.5 text-[10px] ${VERIF_CLS[r.verification ?? ''] ?? 'border-white/15 text-[#faf9f6]/50'}`}>
+                          {r.verification ?? '—'}
+                        </span>
+                        <span className="text-[#faf9f6]/35">{ago(r.age_s)} ago</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
         )}
 
         {runs.length > 0 && (

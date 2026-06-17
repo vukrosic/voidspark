@@ -54,6 +54,29 @@ STATE="$ROOT/autoresearch/daemon-state.json"
 CLOSED="$ROOT/autoresearch/closed.md"
 CHAMPION_JSON="$ROOT/autoresearch/champion.json"  # the live baseline experiments stack on
 
+# ── voidbase Neon mirror ─────────────────────────────────────────────────────
+# Neon is the AUTHORITATIVE shared coordination view; the flat-file ideas/ dir is
+# this daemon's local cache + source of truth for the GPU drain. Each tick we:
+#   pull  — materialize any Neon queue_item a maintainer/UI set to needs-run that
+#           is missing locally AND whose _arq_*.py is already in the repo (the
+#           GitHub code gate). This is how a UI click or a remote contributor
+#           feeds the queue. Guarded: never overrides a live local status.
+#   push  — mirror every local idea + runnable queue_item up to Neon so the UI
+#           and remote boxes read one address.
+# BEST-EFFORT + FAILURE-ISOLATED: a Neon outage logs and is a no-op — the GPU
+# drain never blocks on the cloud DB (PGCONNECT_TIMEOUT bounds the connect).
+# Override the voidbase checkout with $VOIDBASE_REPO; default is the sibling of
+# the tool's repo (…/my-life/voidbase next to …/my-life/voidspark).
+VOIDBASE_REPO="${VOIDBASE_REPO:-$(cd "$TOOL_DIR/../../../voidbase" 2>/dev/null && pwd)}"
+VOIDBASE_SYNC="$VOIDBASE_REPO/scripts/sync_loop.py"
+mirror_neon() {  # mirror_neon push | pull
+  [ -f "$VOIDBASE_SYNC" ] || return 0
+  case "$1" in
+    pull) ( PGCONNECT_TIMEOUT=10 python3 "$VOIDBASE_SYNC" pull --feed --repo "$ROOT" 2>&1 | tail -3 >&2 ) || true ;;
+    push) ( PGCONNECT_TIMEOUT=10 python3 "$VOIDBASE_SYNC" push       --repo "$ROOT" 2>&1 | tail -2 >&2 ) || true ;;
+  esac
+}
+
 # Repo-specific knobs. Defaults below are overridden by the `drain` block of
 # autoresearch/config.json (see load_config) so this daemon is repo-agnostic —
 # the SAME tool drains any repo's experiments; only config.json changes.
@@ -525,14 +548,19 @@ finalize_one() {  # finalize_one <idea> <val> <rdir>
   # the specificity (kill flukes). The old 0.04 (=2σ of CROSS-BOX drift) made the
   # screen so deaf that real +0.01–0.02 stacking wins read NULL and never reached
   # the confirm that would validate them — the lab's core blindness (NOISE-AND-
-  # BAND.md). We set the SCREEN gate to ~1σ of within-session noise (0.02) so
+  # BAND.md). We set the SCREEN gate to ~1σ of within-session noise (0.015) so
   # those wins surface as needs-confirm. Loosening this can only OFFER a candidate
   # for confirmation; it can never promote a fluke (the paired confirm does that).
+  # Lowered 0.02 -> 0.015 (operator policy 2026-06-17): 0.02 was wider than the
+  # ~0.01-0.015 effect sizes now in play at this saturated tier, so real near-miss
+  # wins (e.g. 347 stack-gmlp-mish at Δ-0.0195) read NULL and never reached the
+  # confirm. 0.015 ≈ 1σ within-session — sensitive enough to surface them while the
+  # paired 3-seed confirm (band 0.001 + 3/3 sign agreement) provides specificity.
   # Override unconditionally: the per-box cache returns band=0.04, which would
   # otherwise win over the default below. Env SCREEN_BAND tunes it.
   if [ -n "$CHAMPION_VAL" ] && awk -v v="$CHAMPION_VAL" 'BEGIN{exit !(v+0>0)}'; then
     mean="$CHAMPION_VAL"
-    band="${SCREEN_BAND:-0.02}"
+    band="${SCREEN_BAND:-0.015}"
   fi
   # ── leak guard (runs BEFORE the verdict) ─────────────────────────────────
   # A val far below the baseline neighborhood is never a win — it's a broken
@@ -778,6 +806,8 @@ tick() {
   # reason to claim ideas and then bounce them all to needs-recode on failed scp.
   if ! box_reachable; then log "box $HOST:$PORT unreachable — skipping tick (no claims)"; return 0; fi
 
+  mirror_neon pull   # feed any Neon-approved jobs DOWN before we claim (guarded)
+
   finalize    # always: drain any leftover OK/FAIL into verdicts (idempotent)
 
   if arq_live; then
@@ -855,7 +885,12 @@ if [ "$MODE" = "loop" ]; then
   # var / pipe failure fatal, and without this guard ONE bad tick kills the whole
   # drainer (which then silently stops draining the GPU). The subshell contains
   # the blast radius — a failed tick just logs and the loop carries on next cycle.
-  while true; do ( tick ) || log "tick failed (rc $?) — continuing next cycle"; sleep "$LOOP_SECS"; done
+  while true; do
+    ( tick ) || log "tick failed (rc $?) — continuing next cycle"
+    mirror_neon push   # mirror final state UP after every tick (all return paths)
+    sleep "$LOOP_SECS"
+  done
 else
   tick
+  mirror_neon push
 fi

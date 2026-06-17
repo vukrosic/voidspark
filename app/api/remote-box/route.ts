@@ -35,7 +35,7 @@ type RemoteBox = {
 
 // Pull user/host/port out of a pasted SSH command. Handles the Vast.ai shape
 // with port forwards and extra flags, e.g.
-//   ssh -L 8080:localhost:8080 -p 52674 root@1.208.108.242
+//   ssh -L 8080:localhost:8080 -p 52674 root@1.2.3.4
 //   ssh -p 52674 root@1.2.3.4
 //   ssh root@host -p 22
 function parseSsh(ssh: string): { host: string; port: number; user: string } | null {

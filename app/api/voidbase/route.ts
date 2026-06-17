@@ -16,8 +16,8 @@ export const dynamic = 'force-dynamic';
 
 const VOIDBASE_API = process.env.VOIDBASE_API_URL || 'http://127.0.0.1:8787';
 const ALLOWED = new Set([
-  'health', 'runs', 'threads', 'comparisons', 'champions', 'ideas', 'queue',
-  'eval',
+  'health', 'activity', 'runs', 'threads', 'comparisons', 'champions', 'ideas',
+  'queue', 'eval',
 ]);
 
 export async function POST(req: Request) {

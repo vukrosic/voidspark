@@ -155,7 +155,101 @@ function parseLine(raw: string): ClosedEvent | null {
   return { slug, verdict, val, delta, date, note };
 }
 
+// ---- Neon-backed source (the shared DB) -------------------------------------
+// The record timeline now lives in Neon's `champions` table (synced from the
+// maintainer's champion.json by voidbase/scripts/sync_champions.py). Reading it
+// here makes the localhost dashboard pull the SAME records every distributed
+// contributor sees — not a local file. Same response shape as the closed.md path,
+// so the UI is unchanged; closed.md remains the fallback when Neon is unreachable.
+const VOIDBASE_API = process.env.VOIDBASE_API_URL || 'http://127.0.0.1:8787';
+
+async function fromNeon(): Promise<Record<string, unknown> | null> {
+  const [champRes, runsRes] = await Promise.all([
+    fetch(`${VOIDBASE_API}/champions`, { cache: 'no-store' }),
+    fetch(`${VOIDBASE_API}/runs`, { cache: 'no-store' }),
+  ]);
+  const champions = await champRes.json();
+  const runs = await runsRes.json();
+  if (!Array.isArray(champions) || champions.length === 0) return null;
+
+  // run_id -> human name (the champion run's `name` is the idea slug, e.g.
+  // "323-mom0p90-lr2x"), so RECORD_SUMMARIES keys line up.
+  const nameById = new Map<string, string>(
+    (Array.isArray(runs) ? runs : []).map((r: { id: string; name?: string }) => [r.id, r.name ?? r.id])
+  );
+
+  // Champion timeline, oldest -> newest. Each promotion is a record; running best
+  // strictly decreases (each champion supersedes the prior).
+  const sorted = [...champions].sort((a, b) =>
+    String(a.promoted_at).localeCompare(String(b.promoted_at))
+  );
+  let best: number | null = null;
+  const records: RecordEvent[] = sorted.map((c) => {
+    const slug = nameById.get(c.run_id) ?? String(c.run_id);
+    const val: number | null = c.val_loss ?? null;
+    const improved = val != null && (best == null || val < best);
+    if (val != null && (best == null || val < best)) best = val;
+    const note: string = c.reason ?? '';
+    return {
+      slug,
+      verdict: 'WIN' as Verdict,
+      val,
+      delta: null,
+      date: String(c.promoted_at).slice(0, 10),
+      note,
+      runningBest: best,
+      improved,
+      summary: summarize(slug, note),
+    };
+  });
+
+  // Closed/failed attempts: runs that never became champions and didn't pass
+  // (crashes or rejected confirms), newest first. The champ-* synthetic rows and
+  // the champion runs themselves are excluded.
+  const champRunIds = new Set(champions.map((c) => c.run_id));
+  const closed: ClosedEvent[] = (Array.isArray(runs) ? runs : [])
+    .filter(
+      (r: { id: string; status?: string; verification?: string }) =>
+        !champRunIds.has(r.id) &&
+        !String(r.id).startsWith('champ-') &&
+        (r.status === 'failed' || r.verification === 'rejected')
+    )
+    .map((r: { name?: string; id: string; status?: string; final_val_loss?: number; created_at?: string }) => ({
+      slug: r.name ?? r.id,
+      verdict: (r.status === 'failed' ? 'drift' : 'null') as Verdict,
+      val: r.final_val_loss ?? null,
+      delta: null,
+      date: String(r.created_at ?? '').slice(0, 10),
+      note: r.status === 'failed' ? 'run failed on the box' : 'rejected at confirm',
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+
+  const counts: Record<string, number> = { WIN: records.length };
+  for (const e of closed) counts[e.verdict] = (counts[e.verdict] ?? 0) + 1;
+
+  return {
+    success: true,
+    source: 'neon',
+    records,
+    archivedRecords: [],
+    closed,
+    counts,
+    bestVal: best,
+    baseline: null,
+  };
+}
+
 export async function POST() {
+  // Neon first — the shared record timeline. Any failure (API down, transient
+  // Neon drop) falls through to the local closed.md ledger below, so the UI never
+  // breaks during a cutover.
+  try {
+    const neon = await fromNeon();
+    if (neon) return Response.json(neon, { status: 200 });
+  } catch {
+    /* fall back to closed.md */
+  }
+
   if (!hasActiveRepo()) {
     return Response.json({ success: false, error: 'No project selected' }, { status: 200 });
   }
