@@ -12,17 +12,19 @@ import Link from 'next/link';
 //
 // Data is derived CLIENT-SIDE from the already-allowed resources
 // (champions ⨝ runs, plus the activity contributor list) — no new voidbase
-// endpoint. See the TODO below: a server-side `GET /lineage` (champions ⨝ runs
-// ⨝ contributors, ordered by promoted_at, delta computed server-side) would be
-// cleaner and would carry the inventor handle directly. Today the `runs`
-// resource does not expose contributor_id/handle, so inventor attribution is
-// best-effort (matched via the activity contributor/recent-run lists) and falls
-// back to "anonymous" when it can't be resolved.
+// endpoint. Inventor attribution comes from the contributor_handle the `/runs`
+// read now carries (voidbase #14); the activity snapshot is only a fallback for
+// older run rows, then "anonymous".
 //
-// TODO(voidbase): add `GET /lineage` to voidbase/api/server.py returning
-//   champions joined to runs and contributors (run.name, contributors.handle,
-//   git_branch/commit) ordered by promoted_at, with prev-champion delta computed
-//   server-side; then add 'lineage' to the proxy ALLOWED set and read it here.
+// NOTE on the delta: the per-champion number is the val-loss improvement over
+// the champion it replaced (cross-run, different mechanisms) — NOT a controlled
+// paired Δ (same seed + same box). Paired deltas live on /comparisons. The card
+// labels it "improvement over previous champion" so the two are never conflated.
+//
+// TODO(voidbase): a server-side `GET /lineage` (champions ⨝ runs ⨝ contributors,
+//   ordered by promoted_at, prev-champion delta computed server-side) would let
+//   this page drop the client-side join entirely; add it + the proxy ALLOWED
+//   entry, then read it here.
 
 type Envelope<T> = { success: boolean; data?: T; error?: string };
 
@@ -56,6 +58,11 @@ type Run = {
   git_branch: string | null;
   git_commit: string | null;
   created_at: string | null;
+  // Inventor identity, exposed by the /runs read since voidbase #14. Unlike the
+  // activity snapshot this never ages out, so it's the primary attribution
+  // source now; the activity map is kept only as a fallback for older rows.
+  contributor_id: string | null;
+  contributor_handle: string | null;
 };
 
 // activity.recent_runs / contributors carry the only run->handle hints available
@@ -177,7 +184,12 @@ export default function GalleryPage() {
       const prevVal = prev ? prev.val_loss ?? null : null;
       const deltaVsPrev =
         valLoss != null && prevVal != null ? valLoss - prevVal : null;
-      const handle = champ.run_id ? handleByRunId.get(champ.run_id) ?? null : null;
+      // Attribution: prefer the handle the /runs read now carries directly
+      // (voidbase #14); fall back to the activity snapshot for rows that
+      // predate it; then "anonymous".
+      const handle =
+        run?.contributor_handle ??
+        (champ.run_id ? handleByRunId.get(champ.run_id) ?? null : null);
       return {
         champion: champ,
         runName: run?.name ?? (champ.run_id ? shortId(champ.run_id) : champ.scope),
@@ -349,7 +361,9 @@ cd voidbase &amp;&amp; python3 api/server.py</pre>
                         </div>
                         <div className="text-[10px] uppercase tracking-wide text-[#faf9f6]/40">val-loss</div>
                       </div>
-                      <div>
+                      <div
+                        title="Val-loss improvement over the champion this replaced — a cross-run difference between mechanisms, NOT a controlled paired Δ (same seed + box). Paired deltas live on the record."
+                      >
                         <div
                           className={`text-lg font-semibold tabular-nums ${
                             improved
@@ -362,7 +376,7 @@ cd voidbase &amp;&amp; python3 api/server.py</pre>
                           {fmtDelta(e.deltaVsPrev)}
                         </div>
                         <div className="text-[10px] uppercase tracking-wide text-[#faf9f6]/40">
-                          {i === lineage.length - 1 ? 'first champion' : 'Δ vs previous'}
+                          {i === lineage.length - 1 ? 'first champion' : 'improvement vs prev'}
                         </div>
                       </div>
                     </div>
